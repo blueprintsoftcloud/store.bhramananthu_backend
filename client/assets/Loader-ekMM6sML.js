@@ -1,0 +1,1 @@
+import{j as e,P as s}from"./index-knu0pgZF.js";const r=()=>e.jsxs("div",{className:"flex flex-col items-center justify-center min-h-screen bg-white",children:[e.jsx(s,{color:"#000000"}),e.jsx("p",{className:"mt-4 text-gray-600 text-sm font-medium"})]});export{r as L};

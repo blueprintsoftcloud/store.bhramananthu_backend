@@ -1922,6 +1922,41 @@ export const searchCustomersForOrder = async (req: Request, res: Response) => {
   }
 };
 
+// GET /api/orders/admin-order/check-customer?phone=&email=  (admin / super-admin)
+// Check if a customer already exists with the given phone number or email.
+export const checkCustomerExists = async (req: Request, res: Response) => {
+  try {
+    const phone = (req.query.phone as string | undefined)?.trim();
+    const email = (req.query.email as string | undefined)?.trim().toLowerCase();
+
+    if (!phone && !email) {
+      return res.json({ exists: false, customer: null });
+    }
+
+    const conditions: any[] = [];
+    if (phone) conditions.push({ phone });
+    if (email) conditions.push({ email });
+
+    const customer = await prisma.user.findFirst({
+      where: {
+        role: "CUSTOMER",
+        OR: conditions,
+      },
+      select: { id: true, username: true, email: true, phone: true },
+    });
+
+    if (customer) {
+      const matchType = phone && customer.phone === phone ? "phone" : "email";
+      return res.json({ exists: true, matchType, customer });
+    }
+
+    return res.json({ exists: false, customer: null });
+  } catch (err: any) {
+    logger.error("checkCustomerExists error", err);
+    res.status(500).json({ message: "Customer check failed" });
+  }
+};
+
 // GET /api/orders/admin-order/products?search=&page=1  (admin / super-admin)
 // Returns active products with stock info for product picker.
 export const getProductsForAdminOrder = async (req: Request, res: Response) => {
@@ -2015,7 +2050,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
     if (customerId) {
       const existing = await prisma.user.findUnique({
         where: { id: customerId },
-        select: { id: true, username: true, email: true, role: true },
+        select: { id: true, username: true, email: true, phone: true, role: true },
       });
       if (!existing || existing.role !== "CUSTOMER") {
         return res.status(404).json({ message: "Customer not found" });
@@ -2025,21 +2060,78 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       if (!newCustomer.username?.trim() || !newCustomer.phone?.trim()) {
         return res.status(400).json({ message: "Name and phone are required for a new customer" });
       }
-      // Check if phone already exists
-      const phoneExists = await prisma.user.findUnique({ where: { phone: newCustomer.phone } });
-      if (phoneExists) {
-        return res.status(400).json({ message: "A customer with this phone number already exists. Use existing customer search." });
-      }
-      const created = await prisma.user.create({
-        data: {
-          username: newCustomer.username.trim(),
-          phone: newCustomer.phone.trim(),
-          email: newCustomer.email?.trim().toLowerCase() || null,
-          role: "CUSTOMER",
-          isVerified: true,
-        },
-        select: { id: true, username: true, email: true },
+      const cleanPhone = newCustomer.phone.trim();
+      const cleanEmail = newCustomer.email?.trim().toLowerCase() || null;
+
+      // Check if phone or email already exists
+      let existingUser = await prisma.user.findFirst({
+        where: { phone: cleanPhone },
+        select: { id: true, username: true, email: true, phone: true, role: true },
       });
+
+      if (!existingUser && cleanEmail) {
+        existingUser = await prisma.user.findFirst({
+          where: { email: cleanEmail },
+          select: { id: true, username: true, email: true, phone: true, role: true },
+        });
+      }
+
+      if (existingUser) {
+        const isPhoneMatch = existingUser.phone === cleanPhone;
+        return res.status(409).json({
+          code: "CUSTOMER_ALREADY_EXISTS",
+          message: isPhoneMatch
+            ? "A customer with this phone number already exists."
+            : "A customer with this email address already exists.",
+          conflictField: isPhoneMatch ? "phone" : "email",
+          existingCustomer: {
+            id: existingUser.id,
+            username: existingUser.username,
+            phone: existingUser.phone,
+            email: existingUser.email,
+          },
+        });
+      }
+
+      let created;
+      try {
+        created = await prisma.user.create({
+          data: {
+            username: newCustomer.username.trim(),
+            phone: cleanPhone,
+            email: cleanEmail,
+            role: "CUSTOMER",
+            isVerified: true,
+          },
+          select: { id: true, username: true, email: true, phone: true },
+        });
+      } catch (createErr: any) {
+        if (createErr.code === 11000 || createErr.message?.includes("duplicate")) {
+          const fallbackUser = await prisma.user.findFirst({
+            where: {
+              OR: [
+                { phone: cleanPhone },
+                ...(cleanEmail ? [{ email: cleanEmail }] : []),
+              ],
+            },
+            select: { id: true, username: true, email: true, phone: true },
+          });
+          if (fallbackUser) {
+            return res.status(409).json({
+              code: "CUSTOMER_ALREADY_EXISTS",
+              message: "A customer with these details already exists.",
+              conflictField: "phone",
+              existingCustomer: {
+                id: fallbackUser.id,
+                username: fallbackUser.username,
+                phone: fallbackUser.phone,
+                email: fallbackUser.email,
+              },
+            });
+          }
+        }
+        throw createErr;
+      }
       customer = created;
     } else {
       return res.status(400).json({ message: "Provide either customerId or newCustomer details" });
