@@ -91,15 +91,15 @@ const fetchBrandingData = async (): Promise<BrandingSeoCache> => {
   }
 
   const defaultData: BrandingSeoCache = {
-    companyName: "Amore Webstore",
-    companyTagline: "Crafted by leading air freshener manufacturers, Amor brings high-quality, refreshing scents to your space. Order yours today!",
+    companyName: "Bhramananthu Store",
+    companyTagline: "Authentic Ayurvedic medicated oil for ear balance, vertigo, tinnitus, and insomnia relief by Panakkal Ayurveda.",
     companyLogo: "",
     companyFavicon: "/favicon.png",
-    seoTitle: "Amore Webstore",
-    seoDescription: "Crafted by leading air freshener manufacturers, Amor brings high-quality, refreshing scents to your space. Order yours today!",
+    seoTitle: "Bhramananthu Store | Panakkal Ayurveda",
+    seoDescription: "Authentic Ayurvedic medicated oil for ear balance, vertigo, tinnitus, and insomnia relief by Panakkal Ayurveda.",
     seoOgImage: "",
-    seoKeywords: "Air freshener,Perfumed oil,Perfumes",
-    googleVerification: "A6M6BitJ7rpbVjf_W3tVTZk3lCpTMuKKy3bExzTULl0",
+    seoKeywords: "Bhramananthu,Ayurveda,Ear Balance,Vertigo Oil,Tinnitus,Panakkal Ayurveda",
+    googleVerification: "",
     metaPixelId: "",
     cachedAt: now,
   };
@@ -259,8 +259,8 @@ export const renderDynamicHtml = async (): Promise<string | null> => {
       "@context": "https://schema.org",
       "@type": "WebSite",
       name: data.companyName,
-      alternateName: ["Amore", "amorewebstore.com", data.companyName],
-      url: "https://www.amorewebstore.com",
+      alternateName: ["Bhramananthu", "store.bhramananthu.com", data.companyName],
+      url: "https://store.bhramananthu.com",
     };
     extraMetas.push(`<script type="application/ld+json">${JSON.stringify(siteSchema)}</script>`);
   }

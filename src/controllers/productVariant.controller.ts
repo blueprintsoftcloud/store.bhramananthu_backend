@@ -8,6 +8,7 @@ import { Request, Response } from "express";
 import { createAuditLog } from "../utils/auditLog";
 import { computeOptionsKey, syncProductFromVariants } from "../utils/productVariant";
 import { syncOptionGroupsToFilters } from "../utils/optionFilterSync";
+import { uploadToCloudinary, deleteFromCloudinary } from "../config/cloudinary";
 import logger from "../utils/logger";
 
 // GET /api/product/:productId/variants  (admin)
@@ -32,7 +33,7 @@ export const listVariants = async (req: Request, res: Response) => {
 export const addVariant = async (req: Request, res: Response) => {
   try {
     const productId = req.params.productId as string;
-    const { options, sku, stock, priceOverride, purchasePriceOverride, discountOverride } = req.body;
+    const { options, sku, stock, priceOverride, purchasePriceOverride, discountOverride, image, secondaryImage, images: rawImages } = req.body;
 
     const product = await prisma.product.findUnique({ where: { id: productId } });
     if (!product) return res.status(404).json({ message: "Product not found" });
@@ -50,6 +51,17 @@ export const addVariant = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "A variant needs at least one option (e.g. Size, Storage, Weight)" });
     }
 
+    const primaryImg = image ? String(image).trim() : null;
+    const secondaryImg = secondaryImage ? String(secondaryImage).trim() : null;
+    const variantImages = Array.isArray(rawImages) && rawImages.length
+      ? rawImages.map(String).filter(Boolean)
+      : [primaryImg, secondaryImg].filter(Boolean) as string[];
+
+    const requestedActive = req.body.isActive !== undefined ? Boolean(req.body.isActive) : Boolean(primaryImg);
+    if (requestedActive && !primaryImg) {
+      return res.status(400).json({ message: "1st image is required to add an active variant" });
+    }
+
     const variant = await prisma.productVariant.create({
       data: {
         productId,
@@ -60,6 +72,10 @@ export const addVariant = async (req: Request, res: Response) => {
         priceOverride: priceOverride !== undefined && priceOverride !== null && priceOverride !== "" ? parseFloat(priceOverride) : null,
         purchasePriceOverride: purchasePriceOverride !== undefined && purchasePriceOverride !== null && purchasePriceOverride !== "" ? parseFloat(purchasePriceOverride) : null,
         discountOverride: discountOverride !== undefined && discountOverride !== null && discountOverride !== "" ? parseFloat(discountOverride) : null,
+        image: primaryImg,
+        secondaryImage: secondaryImg,
+        images: variantImages,
+        isActive: requestedActive,
       },
     });
 
@@ -129,11 +145,10 @@ export const generateVariants = async (req: Request, res: Response) => {
 
     const created = [];
     for (const combo of toCreate) {
-      // Selling/purchase price default to 0, not null — a freshly-generated combination
-      // should be explicitly priced (even if that price is 0 until the admin sets it),
-      // not silently inherit whatever the product's own price happens to be.
+      // Selling/purchase price default to 0, not null. Generated combinations start as
+      // inactive (draft) until the admin uploads the required Slot 1 primary image and activates them.
       const variant = await prisma.productVariant.create({
-        data: { productId, options: combo.options, optionsKey: combo.optionsKey, stock: 0, priceOverride: 0, purchasePriceOverride: 0 },
+        data: { productId, options: combo.options, optionsKey: combo.optionsKey, stock: 0, priceOverride: 0, purchasePriceOverride: 0, isActive: false },
       });
       created.push(variant);
     }
@@ -237,7 +252,7 @@ export const updateVariant = async (req: Request, res: Response) => {
   try {
     const productId = req.params.productId as string;
     const variantId = req.params.variantId as string;
-    const { stock, priceOverride, purchasePriceOverride, discountOverride, sku, isActive, options } = req.body;
+    const { stock, priceOverride, purchasePriceOverride, discountOverride, sku, isActive, options, image, secondaryImage, images: rawImages } = req.body;
 
     const existing = await prisma.productVariant.findFirst({ where: { id: variantId, productId } });
     if (!existing) return res.status(404).json({ message: "Variant not found" });
@@ -258,6 +273,19 @@ export const updateVariant = async (req: Request, res: Response) => {
       if (conflict && conflict.id !== variantId) {
         return res.status(409).json({ message: "This option combination already exists for this product" });
       }
+    }
+
+    const nextPrimaryImg = image !== undefined ? (image ? String(image).trim() : null) : existing.image;
+    const nextSecondaryImg = secondaryImage !== undefined ? (secondaryImage ? String(secondaryImage).trim() : null) : existing.secondaryImage;
+    const nextImages = Array.isArray(rawImages)
+      ? rawImages.map(String).filter(Boolean)
+      : (image !== undefined || secondaryImage !== undefined)
+        ? ([nextPrimaryImg, nextSecondaryImg].filter(Boolean) as string[])
+        : existing.images;
+
+    const willBeActive = isActive !== undefined ? Boolean(isActive) : existing.isActive;
+    if (willBeActive && !nextPrimaryImg) {
+      return res.status(400).json({ message: "1st image is required for active variants" });
     }
 
     const updated = await prisma.productVariant.update({
@@ -285,6 +313,9 @@ export const updateVariant = async (req: Request, res: Response) => {
               : parseFloat(discountOverride),
         sku: sku !== undefined ? sku : existing.sku,
         isActive: isActive !== undefined ? Boolean(isActive) : existing.isActive,
+        image: nextPrimaryImg,
+        secondaryImage: nextSecondaryImg,
+        images: nextImages,
       },
     });
 
@@ -323,6 +354,42 @@ export const updateVariant = async (req: Request, res: Response) => {
   }
 };
 
+// Helper: deletes a Cloudinary asset only if NO other variant or product in the database is using that exact URL
+async function safeDeleteVariantImage(url: string | null | undefined, currentVariantId?: string, productId?: string) {
+  if (!url || typeof url !== "string" || !url.trim()) return;
+  try {
+    const cleanUrl = url.trim();
+    // 1. Check if any other variant of this product or any product uses this image
+    const otherVariantCount = await prisma.productVariant.count({
+      where: {
+        ...(currentVariantId ? { id: { not: currentVariantId } } : {}),
+        OR: [{ image: cleanUrl }, { secondaryImage: cleanUrl }],
+      },
+    });
+    if (otherVariantCount > 0) {
+      // Still in use by other variants — do not delete from Cloudinary!
+      return;
+    }
+
+    // 2. Check if the parent product or any other product uses this image as cover/gallery
+    const productCount = await prisma.product.count({
+      where: {
+        image: cleanUrl,
+      },
+    });
+    if (productCount > 0) {
+      // Still in use by product cover — do not delete from Cloudinary!
+      return;
+    }
+
+    await deleteFromCloudinary(cleanUrl).catch((e: unknown) =>
+      logger.warn("Failed to delete variant image from Cloudinary", e),
+    );
+  } catch (e) {
+    logger.warn("safeDeleteVariantImage check error", e);
+  }
+}
+
 // DELETE /api/product/:productId/variants/:variantId  (admin)
 export const deleteVariant = async (req: Request, res: Response) => {
   try {
@@ -331,6 +398,14 @@ export const deleteVariant = async (req: Request, res: Response) => {
 
     const existing = await prisma.productVariant.findFirst({ where: { id: variantId, productId } });
     if (!existing) return res.status(404).json({ message: "Variant not found" });
+
+    // Clean up variant images from Cloudinary ONLY if not shared with other variants
+    const imagesToDelete = [existing.image, existing.secondaryImage, ...(existing.images ?? [])].filter(Boolean) as string[];
+    if (imagesToDelete.length > 0) {
+      await Promise.all(
+        imagesToDelete.map((url) => safeDeleteVariantImage(url, variantId, productId))
+      );
+    }
 
     // Cart/order items referencing this variant keep their variantId (a stale
     // reference, same tradeoff the rest of this app already makes — e.g. Order never
@@ -409,3 +484,199 @@ export const updateVariantAttributeValues = async (req: Request, res: Response) 
     res.status(500).json({ message: "Error updating variant attribute values", error: err.message });
   }
 };
+
+// POST /api/product/:productId/variants/:variantId/images  (admin)
+// Accepts multipart image (Slot 1) and/or secondaryImage (Slot 2) files, or JSON image URLs,
+// uploads them to Cloudinary, and saves image, secondaryImage, and images: [image, secondaryImage].
+export const uploadVariantImages = async (req: Request, res: Response) => {
+  try {
+    const productId = req.params.productId as string;
+    const variantId = req.params.variantId as string;
+
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    const existing = await prisma.productVariant.findFirst({ where: { id: variantId, productId } });
+    if (!existing) return res.status(404).json({ message: "Variant not found" });
+
+    const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+    const body = req.body || {};
+
+    let primaryUrl: string | null = existing.image ?? null;
+    let secondaryUrl: string | null = existing.secondaryImage ?? null;
+
+    const code = product.code || productId;
+
+    // Slot 1: Primary Image
+    if (files?.image?.[0]) {
+      if (existing.image) {
+        safeDeleteVariantImage(existing.image, variantId, productId);
+      }
+      primaryUrl = await uploadToCloudinary(
+        files.image[0].buffer,
+        `products/${code}/variants/${variantId}/primary_${Date.now()}`
+      );
+    } else if (body.image !== undefined) {
+      const nextImg = body.image ? String(body.image).trim() : null;
+      if (!nextImg && existing.image) {
+        safeDeleteVariantImage(existing.image, variantId, productId);
+      }
+      primaryUrl = nextImg;
+    }
+
+    // Slot 2: Secondary Image
+    if (files?.secondaryImage?.[0]) {
+      if (existing.secondaryImage) {
+        safeDeleteVariantImage(existing.secondaryImage, variantId, productId);
+      }
+      secondaryUrl = await uploadToCloudinary(
+        files.secondaryImage[0].buffer,
+        `products/${code}/variants/${variantId}/secondary_${Date.now()}`
+      );
+    } else if (body.secondaryImage !== undefined) {
+      const nextSecondary = body.secondaryImage ? String(body.secondaryImage).trim() : null;
+      if (!nextSecondary && existing.secondaryImage) {
+        safeDeleteVariantImage(existing.secondaryImage, variantId, productId);
+      }
+      secondaryUrl = nextSecondary;
+    }
+
+    const images = [primaryUrl, secondaryUrl].filter(Boolean) as string[];
+
+    const updated = await prisma.productVariant.update({
+      where: { id: variantId },
+      data: {
+        image: primaryUrl,
+        secondaryImage: secondaryUrl,
+        images,
+      },
+    });
+
+    await syncProductFromVariants(productId);
+
+    await createAuditLog({
+      req,
+      action: "UPDATE_PRODUCT_VARIANT",
+      entity: "ProductVariant",
+      entityId: variantId,
+      details: { productId, image: primaryUrl, secondaryImage: secondaryUrl },
+    });
+
+    res.json({ message: "Variant images updated", variant: updated });
+  } catch (err: any) {
+    logger.error("uploadVariantImages error", err);
+    res.status(500).json({ message: "Error uploading variant images", error: err.message });
+  }
+};
+
+// POST /api/product/:productId/variants/apply-images-all  (admin)
+// Sets the same image(s) across ALL variants of a product without duplicate uploads.
+// Accepts:
+// 1. JSON payload: { sourceVariantId, slot?: "primary" | "secondary" | "both" }
+//    OR { image?: string, secondaryImage?: string, slot?: "primary" | "secondary" | "both" }
+// 2. Multipart file upload: req.files.image (Slot 1) and/or req.files.secondaryImage (Slot 2)
+export const applyImagesToAllVariants = async (req: Request, res: Response) => {
+  try {
+    const productId = req.params.productId as string;
+    const product = await prisma.product.findUnique({ where: { id: productId } });
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    const files = req.files as { [fieldname: string]: Express.Multer.File[] } | undefined;
+    const body = req.body || {};
+    const code = product.code || productId;
+    const slot: "primary" | "secondary" | "both" = body.slot || "both";
+
+    let targetImage: string | undefined = undefined;
+    let targetSecondaryImage: string | undefined = undefined;
+
+    // If sourceVariantId is provided, fetch its images
+    if (body.sourceVariantId) {
+      const source = await prisma.productVariant.findFirst({
+        where: { id: String(body.sourceVariantId), productId },
+      });
+      if (!source) {
+        return res.status(404).json({ message: "Source variant not found" });
+      }
+      if (slot === "primary" || slot === "both") {
+        targetImage = source.image || undefined;
+      }
+      if (slot === "secondary" || slot === "both") {
+        targetSecondaryImage = source.secondaryImage || undefined;
+      }
+    } else {
+      // 1. Check if files were uploaded directly in multipart form
+      if (files?.image?.[0]) {
+        targetImage = await uploadToCloudinary(
+          files.image[0].buffer,
+          `products/${code}/variants/shared_primary_${Date.now()}`
+        );
+      } else if (body.image !== undefined) {
+        targetImage = body.image ? String(body.image).trim() : undefined;
+      }
+
+      if (files?.secondaryImage?.[0]) {
+        targetSecondaryImage = await uploadToCloudinary(
+          files.secondaryImage[0].buffer,
+          `products/${code}/variants/shared_secondary_${Date.now()}`
+        );
+      } else if (body.secondaryImage !== undefined) {
+        targetSecondaryImage = body.secondaryImage ? String(body.secondaryImage).trim() : undefined;
+      }
+    }
+
+    if (targetImage === undefined && targetSecondaryImage === undefined) {
+      return res.status(400).json({ message: "No image specified to apply across variants" });
+    }
+
+    const allVariants = await prisma.productVariant.findMany({ where: { productId } });
+    if (allVariants.length === 0) {
+      return res.status(400).json({ message: "No variants exist for this product" });
+    }
+
+    // Update all variants of this product
+    for (const v of allVariants) {
+      const newPrimary = targetImage !== undefined ? targetImage : v.image;
+      const newSecondary = targetSecondaryImage !== undefined ? targetSecondaryImage : v.secondaryImage;
+      const newImages = [newPrimary, newSecondary].filter(Boolean) as string[];
+
+      await prisma.productVariant.update({
+        where: { id: v.id },
+        data: {
+          image: newPrimary,
+          secondaryImage: newSecondary,
+          images: newImages,
+        },
+      });
+    }
+
+    await syncProductFromVariants(productId);
+
+    const updatedVariants = await prisma.productVariant.findMany({
+      where: { productId },
+      orderBy: { createdAt: "asc" },
+    });
+
+    await createAuditLog({
+      req,
+      action: "APPLY_IMAGES_ALL_VARIANTS",
+      entity: "ProductVariant",
+      entityId: productId,
+      details: {
+        productId,
+        variantCount: updatedVariants.length,
+        image: targetImage,
+        secondaryImage: targetSecondaryImage,
+        slot,
+      },
+    });
+
+    res.json({
+      message: `Image applied to all ${updatedVariants.length} variants successfully`,
+      variants: updatedVariants,
+    });
+  } catch (err: any) {
+    logger.error("applyImagesToAllVariants error", err);
+    res.status(500).json({ message: "Error applying images to all variants", error: err.message });
+  }
+};
+

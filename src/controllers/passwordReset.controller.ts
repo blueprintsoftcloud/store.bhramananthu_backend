@@ -69,11 +69,13 @@ export const verifyResetOtp = async (req: Request, res: Response) => {
       { expiresIn: "10m" },
     );
 
+    const isHttps = Boolean(req.secure || req.headers["x-forwarded-proto"] === "https");
+    const isSecure = env.NODE_ENV === "production" && isHttps;
     res.cookie("reset_token", resetToken, {
       maxAge: 10 * 60 * 1000,
       httpOnly: true,
-      sameSite: "none",
-      secure: true,
+      sameSite: (isSecure ? "none" : "lax") as "none" | "lax",
+      secure: isSecure,
       path: "/",
     });
 
@@ -120,10 +122,13 @@ export const resetPassword = async (req: Request, res: Response) => {
       data: { password: hashedPassword },
     });
 
+    const isHttps = Boolean(req.secure || req.headers["x-forwarded-proto"] === "https");
+    const isSecure = env.NODE_ENV === "production" && isHttps;
     res.clearCookie("reset_token", {
       httpOnly: true,
-      sameSite: "none",
-      secure: true,
+      sameSite: (isSecure ? "none" : "lax") as "none" | "lax",
+      secure: isSecure,
+      path: "/",
     });
     res
       .status(200)

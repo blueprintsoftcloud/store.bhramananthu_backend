@@ -5,6 +5,7 @@ import {
   categoryUpdate,
   categoryDelete,
   categoryToggleStatus,
+  categoryToggleFilters,
   updateCategoryNavSettings,
 } from "../controllers/category.controller";
 import {
@@ -55,6 +56,12 @@ router.patch(
   authMiddleware,
   adminOrStaff("CATEGORY_EDIT"),
   categoryToggleStatus,
+);
+router.patch(
+  "/:id/filters-toggle",
+  authMiddleware,
+  adminOrStaff("CATEGORY_EDIT"),
+  categoryToggleFilters,
 );
 router.patch(
   "/nav-order",

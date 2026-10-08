@@ -67,7 +67,7 @@ export const categoryList = async (req: Request, res: Response) => {
 // POST /api/categories  (admin)
 export const categoryAdd = async (req: Request, res: Response) => {
   try {
-    const { code, name, description, parentId } = req.body;
+    const { code, name, description, parentId, showFilters } = req.body;
 
     if (!name) {
       return res.status(400).json({ message: "Name is required" });
@@ -110,6 +110,8 @@ export const categoryAdd = async (req: Request, res: Response) => {
       );
     }
 
+    const resolvedShowFilters = showFilters === false || showFilters === "false" ? false : true;
+
     const category = await prisma.category.create({
       data: {
         code: resolvedCode,
@@ -117,6 +119,7 @@ export const categoryAdd = async (req: Request, res: Response) => {
         description: description ?? null,
         image: imageUrl,
         parentId: parentId ?? null,
+        showFilters: resolvedShowFilters,
       },
     });
 
@@ -136,7 +139,7 @@ export const categoryAdd = async (req: Request, res: Response) => {
 export const categoryUpdate = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
-    const { code, name, description, parentId } = req.body;
+    const { code, name, description, parentId, showFilters } = req.body;
 
     const existing = await prisma.category.findUnique({ where: { id } });
     if (!existing) {
@@ -206,15 +209,20 @@ export const categoryUpdate = async (req: Request, res: Response) => {
       }
     }
 
+    const updateData: Record<string, unknown> = {
+      code: code ?? existing.code,
+      name: name ?? existing.name,
+      description: description ?? existing.description,
+      image: imageUrl,
+      parentId: nextParentId,
+    };
+    if (showFilters !== undefined) {
+      updateData.showFilters = showFilters === true || showFilters === "true" || showFilters === "1";
+    }
+
     const updated = await prisma.category.update({
       where: { id },
-      data: {
-        code: code ?? existing.code,
-        name: name ?? existing.name,
-        description: description ?? existing.description,
-        image: imageUrl,
-        parentId: nextParentId,
-      },
+      data: updateData,
     });
 
     await createAuditLog({ req, action: "UPDATE_CATEGORY", entity: "Category", entityId: updated.id, details: { code: updated.code, name: updated.name } });
@@ -452,4 +460,47 @@ export const updateCategoryNavSettings = async (req: Request, res: Response) => 
     res.status(500).json({ message: "Error updating navigation settings", error: err.message });
   }
 };
+
+// PATCH /api/category/:id/filters-toggle (admin)
+export const categoryToggleFilters = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { showFilters } = req.body;
+
+    const category = await prisma.category.findUnique({ where: { id } });
+    if (!category) {
+      return res.status(404).json({ message: "Category not found" });
+    }
+
+    const nextShowFilters =
+      typeof showFilters === "boolean"
+        ? showFilters
+        : !(category.showFilters ?? true);
+
+    const updated = await prisma.category.update({
+      where: { id },
+      data: { showFilters: nextShowFilters },
+    });
+
+    await createAuditLog({
+      req,
+      action: nextShowFilters ? "ENABLE_CATEGORY_FILTERS" : "DISABLE_CATEGORY_FILTERS",
+      entity: "Category",
+      entityId: id,
+      details: { name: category.name, showFilters: nextShowFilters },
+    });
+
+    await invalidateCategoryListCache();
+    await invalidateSubtreeCache(id);
+
+    res.status(200).json({
+      message: `Category filters ${nextShowFilters ? "enabled" : "disabled"} successfully`,
+      category: updated,
+    });
+  } catch (err: any) {
+    logger.error("categoryToggleFilters error", err);
+    res.status(500).json({ message: "Error toggling category filters", error: err.message });
+  }
+};
+
 

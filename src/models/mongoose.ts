@@ -38,6 +38,9 @@ export interface IUser extends Document {
   avatar?: string;
   /** Refresh-token-reuse detection: the token family id currently valid for this user. */
   refreshTokenFamily?: string;
+  previousRefreshToken?: string;
+  previousRefreshTokens?: Array<{ token: string; rotatedAt: Date }>;
+  lastRotatedAt?: Date;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -52,6 +55,14 @@ const UserSchema = new Schema<IUser>(
     isVerified: { type: Boolean, default: false },
     refreshToken: String,
     refreshTokenFamily: String,
+    previousRefreshToken: String,
+    previousRefreshTokens: [
+      {
+        token: { type: String },
+        rotatedAt: { type: Date, default: Date.now },
+      },
+    ],
+    lastRotatedAt: Date,
     avatar: String,
   },
   { timestamps: true }
@@ -113,6 +124,8 @@ export interface ICategory extends Document {
   /** Left-to-right position among top-level categories in the mega menu. Ties broken
    * by name. Irrelevant for subcategories. */
   navOrder: number;
+  /** Whether sidebar filters (price, ratings, attributes) are shown on this category's storefront page */
+  showFilters: boolean;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -127,6 +140,7 @@ const CategorySchema = new Schema<ICategory>(
     parentId: { type: Schema.Types.ObjectId, ref: 'Category', default: null },
     showInNav: { type: Boolean, default: true },
     navOrder: { type: Number, default: 0 },
+    showFilters: { type: Boolean, default: true },
   },
   { timestamps: true }
 );
@@ -342,6 +356,12 @@ export interface IProductVariant extends Document {
   /** Falls back to Product.discount when null — 0-100. Lets a promotion apply to one
    * option (e.g. the 50ml bottle) without discounting every size of the same product. */
   discountOverride: number | null;
+  /** Primary featured photo for this specific variant (e.g. Red front view) */
+  image?: string | null;
+  /** Secondary angle/detail photo for this specific variant (e.g. Red back view) */
+  secondaryImage?: string | null;
+  /** Array of both variant images [image, secondaryImage] */
+  images?: string[];
   isActive: boolean;
   /** This variant's own average rating — computed from Review documents tagged with
    * this variantId, independently of the parent Product's overall rating. 0 until the
@@ -362,6 +382,9 @@ const ProductVariantSchema = new Schema<IProductVariant>(
     priceOverride: { type: Number, default: null },
     purchasePriceOverride: { type: Number, default: null },
     discountOverride: { type: Number, default: null },
+    image: { type: String, default: null },
+    secondaryImage: { type: String, default: null },
+    images: { type: [String], default: [] },
     isActive: { type: Boolean, default: true },
     rating: { type: Number, default: 0 },
     numReviews: { type: Number, default: 0 },

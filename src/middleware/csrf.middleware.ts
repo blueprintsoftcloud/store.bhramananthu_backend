@@ -28,12 +28,15 @@ const COOKIE_NAME = "csrfToken";
 const HEADER_NAME = "x-csrf-token";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
-const cookieOptions = () => {
-  const isProd = env.NODE_ENV === "production";
+const cookieOptions = (req?: Request) => {
+  const isHttps = req
+    ? Boolean(req.secure || req.headers["x-forwarded-proto"] === "https")
+    : false;
+  const isSecure = env.NODE_ENV === "production" && isHttps;
   return {
     httpOnly: false, // must be readable by client-side JS to be echoed back as a header
-    sameSite: (isProd ? "none" : "lax") as "none" | "lax",
-    secure: isProd,
+    sameSite: (isSecure ? "none" : "lax") as "none" | "lax",
+    secure: isSecure,
     path: "/",
   };
 };
@@ -41,7 +44,7 @@ const cookieOptions = () => {
 export const ensureCsrfCookie = (req: Request, res: Response, next: NextFunction) => {
   if (!req.cookies?.[COOKIE_NAME]) {
     const token = crypto.randomBytes(32).toString("hex");
-    res.cookie(COOKIE_NAME, token, cookieOptions());
+    res.cookie(COOKIE_NAME, token, cookieOptions(req));
     // Make it visible to this same request too (in case csrfProtection runs later in
     // the same request/response cycle for some future route ordering change).
     req.cookies[COOKIE_NAME] = token;

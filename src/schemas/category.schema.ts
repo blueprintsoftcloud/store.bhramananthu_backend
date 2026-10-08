@@ -25,6 +25,7 @@ export const categoryAddSchema = z
       .trim(),
     description: z.string().max(500, "Description too long").trim().optional(),
     parentId: parentIdField,
+    showFilters: z.union([z.boolean(), z.string().transform((v) => v === "true" || v === "1")]).optional(),
   })
   .refine((data) => data.parentId || (data.code && data.code.length > 0), {
     message: "Category code is required",
@@ -36,4 +37,5 @@ export const categoryUpdateSchema = z.object({
   name: z.string().min(1).max(100).trim().optional(),
   description: z.string().max(500).trim().optional(),
   parentId: parentIdField,
+  showFilters: z.union([z.boolean(), z.string().transform((v) => v === "true" || v === "1")]).optional(),
 });

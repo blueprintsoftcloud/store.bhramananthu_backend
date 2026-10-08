@@ -1,16 +1,18 @@
 import { Request, Response } from "express";
-import { Product, Category, ProductAttributeValue } from "../models/mongoose";
+import mongoose from "mongoose";
+import { Product, Category, ProductAttributeValue, OrderItem, ProductVariant } from "../models/mongoose";
 import { deleteFromCloudinary, uploadToCloudinary } from "../config/cloudinary";
 import logger from "../utils/logger";
 import { createAuditLog } from "../utils/auditLog";
 import { sanitizeRichText } from "../utils/sanitizeHtml";
 import { categoryHasSubcategories } from "../utils/categoryTree";
 import { buildAttributeValueWhereConditions } from "../utils/attributeFilter";
+import { syncProductFromVariants } from "../utils/productVariant";
 
-// GET /api/products/list?categoryId=xxx&page=1&limit=20&status=all|active|disabled|out_of_stock&q=&attributeValueIds=  (admin)
+// GET /api/products/list?categoryId=xxx&page=1&limit=20&status=all|active|disabled|out_of_stock&q=&attributeValueIds=&sortBy=  (admin)
 export const productList = async (req: Request, res: Response) => {
   try {
-    const { categoryId, page = "1", limit = "20", status, q, attributeValueIds } =
+    const { categoryId, page = "1", limit = "20", status, q, attributeValueIds, sortBy, sort } =
       req.query as Record<string, string | undefined>;
 
     const pageSize = Math.min(Math.max(parseInt(limit ?? "20") || 20, 1), 100);
@@ -37,6 +39,37 @@ export const productList = async (req: Request, res: Response) => {
       }
     }
 
+    const sortOption = sortBy || sort || "newest";
+    let orderBy: Prisma.ProductOrderByWithRelationInput | Prisma.ProductOrderByWithRelationInput[] = { createdAt: "desc" };
+
+    switch (sortOption) {
+      case "stock_asc":
+        orderBy = [{ stock: "asc" }, { name: "asc" }];
+        break;
+      case "stock_desc":
+        orderBy = [{ stock: "desc" }, { name: "asc" }];
+        break;
+      case "name_asc":
+        orderBy = [{ name: "asc" }];
+        break;
+      case "name_desc":
+        orderBy = [{ name: "desc" }];
+        break;
+      case "price_asc":
+        orderBy = [{ price: "asc" }];
+        break;
+      case "price_desc":
+        orderBy = [{ price: "desc" }];
+        break;
+      case "oldest":
+        orderBy = [{ createdAt: "asc" }];
+        break;
+      case "newest":
+      default:
+        orderBy = [{ createdAt: "desc" }];
+        break;
+    }
+
     const [list, total] = await Promise.all([
       prisma.product.findMany({
         where,
@@ -50,7 +83,7 @@ export const productList = async (req: Request, res: Response) => {
             },
           },
         },
-        orderBy: { createdAt: "desc" },
+        orderBy,
         skip,
         take: pageSize,
       }),
@@ -338,7 +371,7 @@ export const productUpdate = async (req: Request, res: Response) => {
         code: code ?? existing.code,
         name: name ?? existing.name,
         description: description !== undefined ? sanitizeRichText(description) : existing.description,
-        brand: brand !== undefined ? brand : existing.brand,
+        brand: brand !== undefined ? (brand.trim() || null) : existing.brand,
         metaTitle: metaTitle !== undefined ? metaTitle : existing.metaTitle,
         metaDescription: metaDescription !== undefined ? metaDescription : existing.metaDescription,
         price: priceInput ? parseFloat(priceInput) : existing.price,
@@ -382,6 +415,10 @@ export const productUpdate = async (req: Request, res: Response) => {
     }
 
     await createAuditLog({ req, action: "UPDATE_PRODUCT", entity: "Product", entityId: updated.id, details: { code: updated.code, name: updated.name, price: updated.price, purchasePrice: updated.purchasePrice } });
+
+    if (hasActiveVariants) {
+      await syncProductFromVariants(updated.id);
+    }
 
     // `updated` predates the attribute-value delete+recreate above (and never even
     // included attributeValues to begin with) — re-fetch so the response reflects
@@ -454,17 +491,26 @@ export const productDelete = async (req: Request, res: Response) => {
     // Remove from wishlists
     await prisma.wishlist.deleteMany({ where: { productId: id } });
 
-    // Delete main image + every gallery image from Cloudinary — previously only the
-    // main image was cleaned up, leaving every gallery image permanently orphaned.
-    const imagesToDelete = [product.image, ...(product.images ?? [])].filter(Boolean) as string[];
+    // Delete main image + every gallery image + all variant images from Cloudinary
+    const variants = await prisma.productVariant.findMany({ where: { productId: id } });
+    const variantImagesToDelete = variants
+      .flatMap((v: any) => [v.image, v.secondaryImage, ...(v.images ?? [])])
+      .filter(Boolean) as string[];
+
+    const imagesToDelete = [
+      ...new Set([product.image, ...(product.images ?? []), ...variantImagesToDelete].filter(Boolean) as string[]),
+    ];
+
     await Promise.all(
       imagesToDelete.map((url) =>
         deleteFromCloudinary(url).catch((e: unknown) =>
-          logger.warn("Failed to delete product image from Cloudinary", e),
+          logger.warn("Failed to delete product/variant image from Cloudinary", e),
         ),
       ),
     );
 
+    // Delete variant records before product delete
+    await prisma.productVariant.deleteMany({ where: { productId: id } });
     await prisma.product.delete({ where: { id } });
     await createAuditLog({ req, action: "DELETE_PRODUCT", entity: "Product", entityId: id, details: { code: product.code, name: product.name } });
 
@@ -512,6 +558,198 @@ export const productToggleStatus = async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error("productToggleStatus error", err);
     res.status(500).json({ message: "Error toggling product status", error: err.message });
+  }
+};
+
+// GET /api/product/stock-summary (admin)
+export const adminStockSummary = async (req: Request, res: Response) => {
+  try {
+    const [allProducts, variants] = await Promise.all([
+      Product.find({}).select("id _id name stock stockQuantity price basePrice purchasePrice isActive").lean(),
+      ProductVariant.find({}).select("id _id productId stock priceOverride isActive").lean(),
+    ]);
+
+    const totalProducts = allProducts.length;
+    let inStockProducts = 0;
+    let lowStockProducts = 0;
+    let outOfStockProducts = 0;
+    let activeProducts = 0;
+    let totalInventoryUnits = 0;
+    let totalInventoryValue = 0;
+
+    for (const p of allProducts as any[]) {
+      if (p.isActive) activeProducts++;
+      const stock = typeof p.stock === "number" ? p.stock : (p.stockQuantity ?? 0);
+      totalInventoryUnits += Math.max(0, stock);
+      const unitCost = p.purchasePrice ?? p.price ?? 0;
+      totalInventoryValue += Math.max(0, stock) * unitCost;
+
+      if (stock <= 0) {
+        outOfStockProducts++;
+      } else if (stock <= 5) {
+        lowStockProducts++;
+      } else {
+        inStockProducts++;
+      }
+    }
+
+    res.status(200).json({
+      summary: {
+        totalProducts,
+        activeProducts,
+        inStockProducts,
+        lowStockProducts,
+        outOfStockProducts,
+        totalVariants: variants.length,
+        totalInventoryUnits,
+        totalInventoryValue: Math.round(totalInventoryValue),
+      },
+    });
+  } catch (err: any) {
+    logger.error("adminStockSummary error", err);
+    res.status(500).json({ message: "Error loading inventory summary", error: err.message });
+  }
+};
+
+// GET /api/product/detail/:id (admin)
+export const productAdminDetail = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const product = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        category: { select: { id: true, name: true, image: true } },
+        attributeValues: {
+          include: {
+            attribute: { select: { id: true, name: true, type: true } },
+            attributeValue: { select: { id: true, value: true } },
+            variant: { select: { id: true, options: true } },
+          },
+        },
+      },
+    });
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const variants = await prisma.productVariant.findMany({
+      where: { productId: id },
+      orderBy: { createdAt: "asc" },
+    });
+
+    // Compute sales metrics from OrderItem
+    let salesStats = { totalUnitsSold: 0, totalRevenue: 0, totalOrdersCount: 0 };
+    try {
+      const salesAggregate = await OrderItem.aggregate([
+        { $match: { productId: new mongoose.Types.ObjectId(id) } },
+        {
+          $lookup: {
+            from: "orders",
+            localField: "orderId",
+            foreignField: "_id",
+            as: "order",
+          },
+        },
+        { $unwind: "$order" },
+        { $match: { "order.orderStatus": { $nin: ["CANCELLED", "RETURNED"] } } },
+        {
+          $group: {
+            _id: "$productId",
+            totalUnitsSold: { $sum: "$quantity" },
+            totalRevenue: { $sum: { $multiply: ["$quantity", "$price"] } },
+            totalOrders: { $addToSet: "$orderId" },
+          },
+        },
+      ]);
+
+      if (salesAggregate && salesAggregate[0]) {
+        salesStats = {
+          totalUnitsSold: salesAggregate[0].totalUnitsSold ?? 0,
+          totalRevenue: Math.round(salesAggregate[0].totalRevenue ?? 0),
+          totalOrdersCount: Array.isArray(salesAggregate[0].totalOrders) ? salesAggregate[0].totalOrders.length : 0,
+        };
+      }
+    } catch (salesErr) {
+      logger.warn("productAdminDetail: salesAggregate failed, falling back to 0", salesErr);
+    }
+
+    res.status(200).json({
+      product,
+      variants,
+      salesStats,
+    });
+  } catch (err: any) {
+    logger.error("productAdminDetail error", err);
+    res.status(500).json({ message: "Error fetching product details", error: err.message });
+  }
+};
+
+// PATCH /api/product/:id/quick-stock (admin)
+export const quickStockUpdate = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const { stock, variantStocks } = req.body as {
+      stock?: number;
+      variantStocks?: Record<string, number>;
+    };
+
+    const product = await prisma.product.findUnique({ where: { id } });
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    const hasVariants = (await prisma.productVariant.count({ where: { productId: id } })) > 0;
+
+    if (hasVariants && variantStocks && typeof variantStocks === "object") {
+      // Update individual variant stocks
+      for (const [vId, vStock] of Object.entries(variantStocks)) {
+        if (typeof vStock === "number" && vStock >= 0) {
+          await prisma.productVariant.update({
+            where: { id: vId },
+            data: { stock: Math.floor(vStock) },
+          });
+        }
+      }
+      await syncProductFromVariants(id);
+    } else if (typeof stock === "number" && stock >= 0) {
+      await prisma.product.update({
+        where: { id },
+        data: { stock: Math.floor(stock), stockQuantity: Math.floor(stock) },
+      });
+    }
+
+    await createAuditLog({
+      req,
+      action: "UPDATE_PRODUCT_STOCK",
+      entity: "Product",
+      entityId: id,
+      details: {
+        productName: product.name,
+        newStock: stock,
+        variantStocks,
+      },
+    });
+
+    const updated = await prisma.product.findUnique({
+      where: { id },
+      include: {
+        category: { select: { id: true, name: true } },
+      },
+    });
+
+    const updatedVariants = await prisma.productVariant.findMany({
+      where: { productId: id },
+    });
+
+    res.status(200).json({
+      message: "Stock updated successfully",
+      product: updated,
+      variants: updatedVariants,
+    });
+  } catch (err: any) {
+    logger.error("quickStockUpdate error", err);
+    res.status(500).json({ message: "Error updating stock", error: err.message });
   }
 };
 

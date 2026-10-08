@@ -86,10 +86,10 @@ export const login = async (req: Request, res: Response) => {
   try {
     const { password } = req.body;
     const email: string | undefined = req.body.email ? String(req.body.email).trim().toLowerCase() : undefined;
-    if (!email) return res.status(400).json({ message: "Invalid credentials" });
+    if (!email) return res.status(400).json({ message: "Email is required" });
 
     const user = await User.findOne({ email });
-    if (!user) return res.status(400).json({ message: "Invalid credentials" });
+    if (!user) return res.status(400).json({ message: "No account registered with this email" });
 
     if (!user.password) {
       return res.status(400).json({ message: "This account uses mobile OTP login. Please sign in with your mobile number." });
@@ -97,7 +97,7 @@ export const login = async (req: Request, res: Response) => {
 
     const isMatch = await bcrypt.compare(password, user.password);
     if (!isMatch)
-      return res.status(400).json({ message: "Password mismatched" });
+      return res.status(400).json({ message: "Password is incorrect" });
 
     // ── Subscription barrier removed (admins can login unconditionally)
 
@@ -223,8 +223,12 @@ export const resendOtp = async (req: Request, res: Response) => {
 
 // Helper — clears both cookies on all paths they may have been previously set under.
 const clearAuthCookies = (res: Response) => {
-  const isProd = env.NODE_ENV === "production";
-  const opts = { httpOnly: true, sameSite: (isProd ? "none" : "lax") as "none" | "lax", secure: isProd };
+  const req = (res as any).req;
+  const isHttps = req
+    ? Boolean(req.secure || req.headers["x-forwarded-proto"] === "https")
+    : false;
+  const isSecure = env.NODE_ENV === "production" && isHttps;
+  const opts = { httpOnly: true, sameSite: (isSecure ? "none" : "lax") as "none" | "lax", secure: isSecure };
   // Always clear the canonical root path.
   res.clearCookie("jwt",          { ...opts, path: "/" });
   res.clearCookie("refreshToken", { ...opts, path: "/" });
@@ -279,7 +283,12 @@ export const logout = async (req: Request, res: Response) => {
     }
 
     if (userId) {
-      await User.findByIdAndUpdate(userId, { refreshToken: null, refreshTokenFamily: null });
+      await User.findByIdAndUpdate(userId, {
+        refreshToken: null,
+        previousRefreshToken: null,
+        refreshTokenFamily: null,
+        lastRotatedAt: null,
+      });
     }
 
     return res.status(200).json({ message: "Logout Successful" });
@@ -312,29 +321,39 @@ export const refreshTokens = async (req: Request, res: Response) => {
       return res.status(403).json({ message: "Invalid or revoked refresh token." });
     }
 
-    if (user.refreshToken !== decoded.tokenValue) {
-      // Reuse detection: a refresh token from a KNOWN family (one we previously issued
-      // and have since rotated past) being presented again means someone has a stale
-      // copy of it — the classic signature of a stolen refresh token used after the
-      // legitimate client already rotated forward. Revoke the entire family rather than
-      // just rejecting this one request, forcing every device on it to re-authenticate.
-      if (decoded.family && user.refreshTokenFamily && decoded.family === user.refreshTokenFamily) {
-        await User.findByIdAndUpdate(user.id, { refreshToken: null, refreshTokenFamily: null });
-        logger.warn("Refresh token reuse detected — session family revoked", {
-          userId: user.id,
-          family: decoded.family,
-          ip: req.ip,
-        });
-        clearAuthCookies(res);
-        return res.status(403).json({
-          message: "Suspicious activity detected on this session. Please log in again.",
-        });
-      }
+    const now = Date.now();
+    const GRACE_WINDOW_MS = 15 * 60 * 1000; // 15-minute grace window for in-flight requests / multi-tab synchronization
 
+    const isCurrentToken = user.refreshToken === decoded.tokenValue;
+
+    // Check recent rotated tokens array
+    const recentTokens = user.previousRefreshTokens || [];
+    const isInRecentTokens = recentTokens.some(
+      (item) =>
+        item.token === decoded.tokenValue &&
+        now - new Date(item.rotatedAt).getTime() < GRACE_WINDOW_MS,
+    );
+
+    // Fallback check for single legacy field
+    const isLegacyGraceToken =
+      !!user.previousRefreshToken &&
+      user.previousRefreshToken === decoded.tokenValue &&
+      decoded.family === user.refreshTokenFamily &&
+      !!user.lastRotatedAt &&
+      now - new Date(user.lastRotatedAt).getTime() < GRACE_WINDOW_MS;
+
+    const isGracePeriodToken = isInRecentTokens || isLegacyGraceToken;
+
+    if (!isCurrentToken && !isGracePeriodToken) {
+      logger.warn("Refresh token invalid or expired outside grace period", {
+        userId: user.id,
+        family: decoded.family,
+        ip: req.ip,
+      });
       clearAuthCookies(res);
-      return res
-        .status(403)
-        .json({ message: "Invalid or revoked refresh token." });
+      return res.status(403).json({
+        message: "Invalid or expired session. Please log in again.",
+      });
     }
 
     // Strict Access Revocation Check for Staff
@@ -378,22 +397,36 @@ export const refreshTokens = async (req: Request, res: Response) => {
 // This server only calls verifyAccessToken — the one server-side allowed endpoint.
 const MSG91_AUTH_KEY = env.MSG91_AUTH_KEY;
 
-/** Shared helper: verify a MSG91 widget access token server-side. */
+/** Shared helper: verify a MSG91 widget access token server-side with 12s timeout. */
 const verifyMsg91Token = async (
   accessToken: string,
 ): Promise<{ ok: boolean; status?: number; body?: Record<string, unknown> }> => {
-  const resp = await fetch(
-    "https://control.msg91.com/api/v5/widget/verifyAccessToken",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ authkey: MSG91_AUTH_KEY, "access-token": accessToken }),
-    },
-  );
-  const rawText = await resp.text();
-  let body: Record<string, unknown> = {};
-  try { body = JSON.parse(rawText); } catch { body = { raw: rawText }; }
-  return { ok: resp.ok && body.type === "success", status: resp.status, body };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+  try {
+    const resp = await fetch(
+      "https://control.msg91.com/api/v5/widget/verifyAccessToken",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ authkey: MSG91_AUTH_KEY, "access-token": accessToken }),
+        signal: controller.signal,
+      },
+    );
+    clearTimeout(timeoutId);
+    const rawText = await resp.text();
+    let body: Record<string, unknown> = {};
+    try { body = JSON.parse(rawText); } catch { body = { raw: rawText }; }
+    return { ok: resp.ok && body.type === "success", status: resp.status, body };
+  } catch (err: unknown) {
+    clearTimeout(timeoutId);
+    const e = err as Error;
+    if (e?.name === "AbortError" || controller.signal.aborted) {
+      logger.error("verifyMsg91Token: timeout verifying token with MSG91 gateway");
+      return { ok: false, status: 504, body: { message: "MSG91 verification gateway timeout" } };
+    }
+    throw err;
+  }
 };
 
 // POST /api/auth/mobile/login

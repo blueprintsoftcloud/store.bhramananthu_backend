@@ -1,3 +1,6 @@
+import { deleteFromCloudinary } from "../config/cloudinary";
+import logger from "./logger";
+
 // src/utils/productVariant.ts
 // Shared helper for ProductVariant's `options` map — see mongoose.ts's ProductVariant
 // for the full design (admin-named axes like "Storage"/"RAM"/"Weight" instead of a
@@ -68,9 +71,10 @@ export async function syncProductFromVariants(productId: string, client: any = p
 
   const product = await client.product.findUnique({
     where: { id: productId },
-    select: { price: true, purchasePrice: true, discount: true },
+    select: { price: true, purchasePrice: true, discount: true, image: true },
   });
   const currentPrice = product?.price ?? 0;
+  const oldProductImage = product?.image;
 
   let price = currentPrice;
   let purchasePrice = product?.purchasePrice ?? null;
@@ -84,16 +88,41 @@ export async function syncProductFromVariants(productId: string, client: any = p
     );
     price = cheapest.priceOverride ?? currentPrice;
     purchasePrice = cheapest.purchasePriceOverride ?? purchasePrice;
-    discount = cheapest.discountOverride ?? discount;
+    discount = cheapest.discountOverride != null ? cheapest.discountOverride : 0;
   }
+
+  // Auto-sync product cover image from the first variant that has an image so search/listings
+  // have a cover photo without uploading duplicate files.
+  const firstWithImage = activeVariants.find((v: any) => v.image) || allVariants.find((v: any) => v.image);
+  const imageUpdate = firstWithImage?.image ? { image: firstWithImage.image } : {};
 
   // stockQuantity mirrors stock on every other write path (product.controller.ts's
   // productAdd/productUpdate) — nothing currently reads it, but keeping it in sync here
   // too avoids the two fields silently drifting apart for whoever looks at it next.
   await client.product.update({
     where: { id: productId },
-    data: { stock, stockQuantity: stock, price, purchasePrice, discount },
+    data: { stock, stockQuantity: stock, price, purchasePrice, discount, ...imageUpdate },
   });
+
+  // If the cover image was replaced with a variant image, check if the old standalone product image is now orphaned
+  if (firstWithImage?.image && oldProductImage && oldProductImage !== firstWithImage.image) {
+    const isOldImageUsedByVariant = allVariants.some(
+      (v: any) =>
+        v.image === oldProductImage ||
+        v.secondaryImage === oldProductImage ||
+        (Array.isArray(v.images) && v.images.includes(oldProductImage)),
+    );
+    if (!isOldImageUsedByVariant) {
+      const otherProductCount = await client.product.count({
+        where: { id: { not: productId }, image: oldProductImage },
+      });
+      if (otherProductCount === 0) {
+        await deleteFromCloudinary(oldProductImage).catch((e: unknown) =>
+          logger.warn("Failed to delete orphaned standalone product image from Cloudinary after variant sync", e),
+        );
+      }
+    }
+  }
 }
 
 /** One row in a customer-facing listing (search results / category page) after
@@ -107,6 +136,9 @@ export interface ExpandedListingRow {
   price: number;
   discount: number;
   stock: number;
+  image?: string | null;
+  secondaryImage?: string | null;
+  images?: string[];
   [key: string]: unknown;
 }
 
@@ -123,7 +155,7 @@ export interface ExpandedListingRow {
  * productList) — that page manages products, not purchase options, and still needs
  * exactly one row per product to edit/delete/manage variants on.
  */
-export async function expandProductsWithVariants<T extends { id: string; price: number; discount?: number | null; stock?: number | null }>(
+export async function expandProductsWithVariants<T extends { id: string; price: number; discount?: number | null; stock?: number | null; image?: string | null; images?: string[] }>(
   products: T[],
   client: any = prisma,
 ): Promise<ExpandedListingRow[]> {
@@ -154,6 +186,9 @@ export async function expandProductsWithVariants<T extends { id: string; price: 
         price: product.price,
         discount: product.discount ?? 0,
         stock: product.stock ?? 0,
+        image: product.image ?? null,
+        secondaryImage: product.images?.[0] ?? null,
+        images: product.images ?? [],
       });
       continue;
     }
@@ -162,11 +197,13 @@ export async function expandProductsWithVariants<T extends { id: string; price: 
         ...product,
         variantId: v.id,
         variantOptions: v.options,
-        // Same fallback rule as ProductDetailPage.tsx's effectivePrice/effectiveDiscount
-        // and syncProductFromVariants above — a variant without its own override
-        // inherits the product's current value.
+        // Variant's specific images (Slot 1 & Slot 2), falling back to product images
+        image: v.image || product.image || null,
+        secondaryImage: v.secondaryImage || (v.images?.[1] ? v.images[1] : (product.images?.[0] ?? null)),
+        images: v.images?.length ? v.images : (product.images ?? []),
+        // Variant price & discount: if the variant has no explicit discount override, it has 0% discount
         price: v.priceOverride ?? product.price,
-        discount: v.discountOverride ?? product.discount ?? 0,
+        discount: v.discountOverride != null ? v.discountOverride : 0,
         stock: v.stock,
         // Each variant's OWN rating, not the parent product's — a variant with no
         // reviews of its own shows 0/no-reviews rather than inheriting a sibling

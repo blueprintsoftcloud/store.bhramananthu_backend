@@ -5,11 +5,10 @@ import { adminOrStaff } from "../middleware/staffPermission.middleware";
 
 const router = Router();
 
-// Public — no auth required (the About/Terms/Help pages, and the admin editor, both read this)
+// Public: fetch static pages content
 router.get("/", getStaticPages);
 
-// Admin — same BANNER_EDIT gate as the rest of Homepage Manager's content writes,
-// since this is the same "storefront content" bucket, not worth a new permission key.
+// Admin/Staff with BANNER_EDIT permission: update static page content
 router.put("/:page", authMiddleware, adminOrStaff("BANNER_EDIT"), updateStaticPage);
 
 export default router;

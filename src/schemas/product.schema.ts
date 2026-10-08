@@ -12,7 +12,7 @@ export const productAddSchema = z.object({
     .min(1, "Name cannot be empty")
     .max(200, "Name too long")
     .trim(),
-  description: z.string().max(2000, "Description too long").trim().optional(),
+  description: z.string().max(50000, "Description too long").trim().optional(),
   brand: z.string().max(100, "Brand too long").trim().optional(),
   // Optional per-product SEO overrides — fall back to name/description on the frontend
   // when unset, so filling these in is never required.
@@ -52,7 +52,7 @@ export const productAddSchema = z.object({
 export const productUpdateSchema = z.object({
   code: z.string().min(1).max(50).trim().optional(),
   name: z.string().min(1).max(200).trim().optional(),
-  description: z.string().max(2000).trim().optional(),
+  description: z.string().max(50000, "Description too long").trim().optional(),
   brand: z.string().max(100).trim().optional(),
   metaTitle: z.string().max(70, "Meta title too long").trim().optional(),
   metaDescription: z.string().max(160, "Meta description too long").trim().optional(),

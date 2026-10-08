@@ -34,7 +34,7 @@ const computeCartTotal = (
   }>,
 ) => items.reduce((sum, item) => {
   const base = item.variant?.priceOverride ?? item.product?.price ?? 0;
-  const discount = item.variant?.discountOverride ?? item.product?.discount;
+  const discount = item.variant ? (item.variant.discountOverride ?? 0) : item.product?.discount;
   const price = computeDiscountedPrice(base, discount);
   return sum + price * item.quantity;
 }, 0);
@@ -170,7 +170,7 @@ export const cartList = async (req: Request, res: Response) => {
     const rawItems = await CartItem
       .find({ cartId: cart._id })
       .populate<{ productId: any }>('productId', 'name price discount image stock isActive categoryId')
-      .populate<{ variantId: any }>('variantId', 'options stock priceOverride discountOverride isActive')
+      .populate<{ variantId: any }>('variantId', 'options stock priceOverride discountOverride isActive image secondaryImage images')
       .lean();
 
     // Validate: remove items whose product no longer exists/is inactive, OR whose
@@ -206,8 +206,9 @@ export const cartList = async (req: Request, res: Response) => {
             price: variant?.priceOverride ?? prod.price,
             // A variant's own discount (e.g. a promo on just one option) wins over
             // the product-level one — see mongoose.ts's ProductVariant.
-            discount: variant?.discountOverride ?? prod.discount,
-            image: prod.image,
+            discount: variant ? (variant.discountOverride ?? 0) : prod.discount,
+            image: variant?.image || prod.image,
+            secondaryImage: variant?.secondaryImage || null,
             stock: variant ? variant.stock : prod.stock,
             isActive: prod.isActive,
             categoryId: prod.categoryId ? String(prod.categoryId) : null,

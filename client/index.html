@@ -1,10 +1,12 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-text-size="large">
   <head>
     <meta charset="UTF-8" />
     <script>
       (function() {
         try {
+          var size = localStorage.getItem("bhramananthu_text_size") || "large";
+          document.documentElement.setAttribute("data-text-size", size);
           var cache = localStorage.getItem("crm_branding_cache");
           if (cache) {
             var data = JSON.parse(cache);
@@ -32,12 +34,15 @@
 
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="referrer" content="strict-origin-when-cross-origin" />
-    <meta name="description" content="Crafted by leading air freshener manufacturers, Amor brings high-quality, refreshing scents to your space. Order yours today!" />
+    <meta name="description" content="Bhramananthu Oil - 100% Ayurvedic solution for ear balance, vertigo, and dizziness relief by Panakkal Ayurveda Pharmacy." />
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="Amore Webstore" />
-    <title>Amore Webstore</title>
-    <script type="module" crossorigin src="/assets/index-knu0pgZF.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-CTQCo2Fz.css">
+    <meta property="og:site_name" content="Bhramananthu Store" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:ital,wght@0,400;0,700;1,400;1,700&family=Literata:ital,opsz,wght@0,7..72,400;0,7..72,600;0,7..72,700;0,7..72,800;1,7..72,400;1,7..72,700&family=Noto+Sans+Malayalam:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <title>Bhramananthu Store | Panakkal Ayurveda Pharmacy</title>
+    <script type="module" crossorigin src="/assets/index-DEIbVTL4.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-Bk6eNQLf.css">
   </head>
   <body>
     <div id="root"></div>

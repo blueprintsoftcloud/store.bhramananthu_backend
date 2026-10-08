@@ -15,7 +15,7 @@ export const getAllCategories = async (_req: Request, res: Response) => {
     const categories = await getCached("user-categories:nav", () =>
       prisma.category.findMany({
         where: { isActive: true },
-        select: { id: true, name: true, image: true, parentId: true, showInNav: true, navOrder: true },
+        select: { id: true, name: true, image: true, parentId: true, showInNav: true, navOrder: true, showFilters: true },
         // navOrder only matters (and is only set) for top-level categories — subcategories
         // all default to 0 and fall back to alphabetical among themselves either way.
         orderBy: { navOrder: "asc", name: "asc" },
@@ -156,22 +156,29 @@ export const getProductsByCategoryId = async (req: Request, res: Response) => {
     };
     const orderBy = orderByMap[sort ?? "featured"] ?? { createdAt: "desc" };
 
-    // Fetch every matching product (uncapped skip/take — pagination happens after
-    // variant expansion below), same 500-row safety cap as searchProducts.
-    const candidates = await prisma.product.findMany({
-      where,
-      include: {
-        category: { select: { id: true, name: true } },
-        attributeValues: {
-          include: {
-            attribute: { select: { id: true, name: true, type: true } },
-            attributeValue: { select: { id: true, value: true } },
+    // Fetch matching products and category details
+    const [candidates, categoryDoc] = await Promise.all([
+      prisma.product.findMany({
+        where,
+        include: {
+          category: { select: { id: true, name: true } },
+          attributeValues: {
+            include: {
+              attribute: { select: { id: true, name: true, type: true } },
+              attributeValue: { select: { id: true, value: true } },
+            },
           },
         },
-      },
-      orderBy,
-      take: 500,
-    });
+        orderBy,
+        take: 500,
+      }),
+      prisma.category.findFirst({
+        where: {
+          OR: [{ id: categoryId }, { code: categoryId }],
+        },
+        select: { id: true, name: true, showFilters: true, parentId: true },
+      }),
+    ]);
 
     const expandedAll = await expandProductsWithVariants(candidates);
     // Drop variant rows the attribute filter didn't actually match — see
@@ -198,6 +205,7 @@ export const getProductsByCategoryId = async (req: Request, res: Response) => {
 
     res.status(200).json({
       message: "Products fetched by the selected category ID",
+      category: categoryDoc,
       getProducts,
       pagination: {
         total,

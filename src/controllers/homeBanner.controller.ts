@@ -63,8 +63,8 @@ export const getPublicBanners = async (req: Request, res: Response) => {
       return {
         banners,
         discountSection: {
-          title: headers["HOME_DISCOUNT_TITLE"] ?? "SHOP NOW AND SAVE 30%",
-          subtitle: headers["HOME_DISCOUNT_SUBTITLE"] ?? "Grace at a Great Price! Sarees on Discount",
+          title: headers["HOME_DISCOUNT_TITLE"] ?? "SPECIAL OFFERS & DISCOUNTS",
+          subtitle: headers["HOME_DISCOUNT_SUBTITLE"] ?? "Authentic Ayurvedic Formulations at Great Value",
         },
         carouselSection: {
           title: headers["HOME_CAROUSEL_TITLE"] ?? "Curated Looks For You",

@@ -1,46 +1,43 @@
-// src/controllers/staticPages.controller.ts
-//
-// About Us / Terms & Conditions / Help Center — the three standalone content pages
-// that don't fit companySettings.controller.ts's flat-string-field model (each is a
-// small structured blob, not a single value). Same AppSetting key-value pattern as
-// HERO_CONFIG/FOOTER_CONFIG: one JSON-stringified blob per page, upserted as a whole on
-// save. Contact Us deliberately has no key here — it reuses SEO_ORG_ADDRESS/PHONE/EMAIL
-// (companySettings.controller.ts) plus PAGE_CONTACT_INTRO, so an admin never fills in
-// the same business info twice.
-
 import { Request, Response } from "express";
 import logger from "../utils/logger";
 import { createAuditLog } from "../utils/auditLog";
 
-const PAGE_KEYS = {
-  about: "PAGE_ABOUT",
-  terms: "PAGE_TERMS",
-  help: "PAGE_HELP",
-} as const;
-type PageName = keyof typeof PAGE_KEYS;
-
 const DEFAULT_ABOUT = {
   title: "About Us",
-  body: "Tell your customers who you are, what you stand for, and why they should shop with you. Edit this from Content Pages in the admin dashboard.",
+  body: "Welcome to our store! We are dedicated to bringing you the best products with top-quality service.\n\nOur mission is to provide an exceptional shopping experience with carefully curated collections, prompt support, and seamless delivery.",
 };
 
 const DEFAULT_TERMS = {
   title: "Terms & Conditions",
-  body: "Add your store's terms and conditions here — shipping, returns, and usage policies. Edit this from Content Pages in the admin dashboard.",
+  body: "Welcome to our store. By accessing or using our website, you agree to comply with and be bound by these terms and conditions.\n\nAll orders placed on our store are subject to product availability and confirmation of order price.\n\nWe reserve the right to modify these terms at any time without prior notice.",
 };
 
 const DEFAULT_HELP = {
   title: "Help Center",
   faqs: [
-    { question: "How do I track my order?", answer: "You can track your order from the My Orders page once it has shipped." },
-    { question: "What is your return policy?", answer: "Add your store's return policy here from Content Pages in the admin dashboard." },
+    {
+      question: "How do I track my order?",
+      answer: "You can track your order using the 'Track Order' option in the navigation bar or from your Orders page.",
+    },
+    {
+      question: "What payment methods do you accept?",
+      answer: "We accept UPI (Google Pay, PhonePe, Paytm), Credit/Debit Cards, Net Banking, and Cash on Delivery (where applicable).",
+    },
+    {
+      question: "What is your return policy?",
+      answer: "We accept returns within 7 days of delivery for eligible items in their original condition and packaging.",
+    },
+    {
+      question: "How can I contact support?",
+      answer: "You can reach out to us through our Contact Us page or by emailing our support team.",
+    },
   ],
 };
 
-const DEFAULTS: Record<PageName, unknown> = {
-  about: DEFAULT_ABOUT,
-  terms: DEFAULT_TERMS,
-  help: DEFAULT_HELP,
+const PAGE_KEY_MAP: Record<string, string> = {
+  about: "PAGE_ABOUT",
+  terms: "PAGE_TERMS",
+  help: "PAGE_HELP",
 };
 
 const parseJsonOrDefault = <T>(value: string | undefined, fallback: T): T => {
@@ -52,46 +49,80 @@ const parseJsonOrDefault = <T>(value: string | undefined, fallback: T): T => {
   }
 };
 
-// GET /api/pages — public (customer-facing static pages + the admin editor both read this)
+/**
+ * GET /api/pages
+ * Public endpoint to fetch content for About, Terms, and Help pages.
+ */
 export const getStaticPages = async (_req: Request, res: Response) => {
   try {
     const rows = (await prisma.appSetting.findMany({
-      where: { key: { in: Object.values(PAGE_KEYS) } },
+      where: {
+        key: { in: ["PAGE_ABOUT", "PAGE_TERMS", "PAGE_HELP"] },
+      },
     })) || [];
+
     const map: Record<string, string> = {};
-    for (const row of rows) map[row.key] = row.value;
+    for (const row of rows) {
+      map[row.key] = row.value;
+    }
+
+    const about = parseJsonOrDefault(map["PAGE_ABOUT"], DEFAULT_ABOUT);
+    const terms = parseJsonOrDefault(map["PAGE_TERMS"], DEFAULT_TERMS);
+    const help = parseJsonOrDefault(map["PAGE_HELP"], DEFAULT_HELP);
 
     res.status(200).json({
-      about: parseJsonOrDefault(map[PAGE_KEYS.about], DEFAULT_ABOUT),
-      terms: parseJsonOrDefault(map[PAGE_KEYS.terms], DEFAULT_TERMS),
-      help: parseJsonOrDefault(map[PAGE_KEYS.help], DEFAULT_HELP),
+      about,
+      terms,
+      help,
     });
   } catch (err: any) {
     logger.error("getStaticPages error", err);
-    res.status(500).json({ message: "Error fetching pages" });
+    res.status(500).json({ message: "Error fetching static pages content" });
   }
 };
 
-// PUT /api/admin/pages/:page — admin/staff (BANNER_EDIT)
+/**
+ * PUT /api/pages/:page
+ * Admin/Staff endpoint to update a static page (about, terms, help).
+ */
 export const updateStaticPage = async (req: Request, res: Response) => {
   try {
-    const page = req.params.page as PageName;
-    if (!(page in PAGE_KEYS)) {
-      res.status(400).json({ message: "Unknown page" });
-      return;
+    const pageParam = Array.isArray(req.params.page) ? req.params.page[0] : req.params.page;
+    const pageKey = pageParam?.toLowerCase() || "";
+    const settingKey = PAGE_KEY_MAP[pageKey];
+
+    if (!settingKey) {
+      return res.status(400).json({ message: `Invalid page identifier: ${pageParam}. Valid options: about, terms, help` });
     }
-    const content = req.body as object;
-    const key = PAGE_KEYS[page];
-    const value = JSON.stringify(content);
+
+    const content = req.body;
+    if (!content || typeof content !== "object") {
+      return res.status(400).json({ message: "Invalid page content provided" });
+    }
+
+    const jsonValue = JSON.stringify(content);
+
     await prisma.appSetting.upsert({
-      where: { key },
-      update: { value },
-      create: { key, value },
+      where: { key: settingKey },
+      update: { value: jsonValue },
+      create: { key: settingKey, value: jsonValue },
     });
-    await createAuditLog({ req, action: `UPDATE_PAGE_${page.toUpperCase()}`, entity: "AppSetting", entityId: key });
-    res.status(200).json({ message: "Page updated", [page]: content ?? DEFAULTS[page] });
+
+    await createAuditLog({
+      req,
+      action: "UPDATE_STATIC_PAGE",
+      entity: "Page",
+      entityId: settingKey,
+      details: { page: pageKey, content },
+    });
+
+    res.status(200).json({
+      message: `${pageKey} page updated successfully`,
+      page: pageKey,
+      content,
+    });
   } catch (err: any) {
     logger.error("updateStaticPage error", err);
-    res.status(500).json({ message: "Error updating page" });
+    res.status(500).json({ message: "Error updating static page" });
   }
 };

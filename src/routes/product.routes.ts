@@ -5,6 +5,9 @@ import {
   productUpdate,
   productDelete,
   productToggleStatus,
+  adminStockSummary,
+  productAdminDetail,
+  quickStockUpdate,
 } from "../controllers/product.controller";
 import {
   listVariants,
@@ -14,6 +17,8 @@ import {
   updateVariant,
   deleteVariant,
   updateVariantAttributeValues,
+  uploadVariantImages,
+  applyImagesToAllVariants,
 } from "../controllers/productVariant.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
 import { adminOrStaff } from "../middleware/staffPermission.middleware";
@@ -24,6 +29,10 @@ import { productAddSchema, productUpdateSchema } from "../schemas/product.schema
 const router = Router();
 
 // Admin/Staff only — gated by PRODUCT_MANAGEMENT feature flag + granular permission
+router.get("/stock-summary", authMiddleware, adminOrStaff("PRODUCT_VIEW"), adminStockSummary);
+router.get("/detail/:id", authMiddleware, adminOrStaff("PRODUCT_VIEW"), productAdminDetail);
+router.patch("/:id/quick-stock", authMiddleware, adminOrStaff("PRODUCT_EDIT"), quickStockUpdate);
+
 router.get("/list", authMiddleware, adminOrStaff("PRODUCT_VIEW"), productList);
 router.post(
   "/add",
@@ -84,6 +93,26 @@ router.put(
   authMiddleware,
   adminOrStaff("PRODUCT_EDIT"),
   updateVariantAttributeValues,
+);
+router.post(
+  "/:productId/variants/apply-images-all",
+  authMiddleware,
+  adminOrStaff("PRODUCT_EDIT"),
+  upload.fields([
+    { name: "image", maxCount: 1 },
+    { name: "secondaryImage", maxCount: 1 },
+  ]),
+  applyImagesToAllVariants,
+);
+router.post(
+  "/:productId/variants/:variantId/images",
+  authMiddleware,
+  adminOrStaff("PRODUCT_EDIT"),
+  upload.fields([
+    { name: "image", maxCount: 1 },
+    { name: "secondaryImage", maxCount: 1 },
+  ]),
+  uploadVariantImages,
 );
 router.put(
   "/:productId/variants/:variantId",

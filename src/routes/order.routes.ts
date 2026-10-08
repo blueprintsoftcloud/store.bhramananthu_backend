@@ -16,10 +16,12 @@ import {
   getCustomerTransactions,
   searchCustomersForOrder,
   checkCustomerExists,
+  checkRecentOrderForCustomer,
   getProductsForAdminOrder,
   placeAdminOrder,
   getBulkInvoices,
   markInvoicesPrinted,
+  bulkUpdateStatus,
   lookupPincode,
   getShippingToggles,
 } from "../controllers/order.controller";
@@ -56,6 +58,7 @@ router.get("/all", authMiddleware, adminOrStaff(["ORDER_VIEW", "ORDER_UPDATE"]),
 router.get("/stats", authMiddleware, adminOrStaff(["ORDER_VIEW", "ORDER_UPDATE"]), getOrderStats);
 router.get("/bulk-invoices", authMiddleware, adminOrStaff(["ORDER_VIEW", "ORDER_UPDATE"]), getBulkInvoices);
 router.post("/mark-invoices-printed", authMiddleware, adminOrStaff(["ORDER_VIEW", "ORDER_UPDATE"]), markInvoicesPrinted);
+router.put("/bulk-update-status", authMiddleware, adminOrStaff("ORDER_UPDATE"), bulkUpdateStatus);
 router.get("/customer-transactions", authMiddleware, adminOrStaff("ORDER_VIEW"), getCustomerTransactions);
 router.put("/update/:id", authMiddleware, adminOrStaff("ORDER_UPDATE"), validate(updateOrderStatusSchema), updateStatus);
 router.patch("/:id/refund", authMiddleware, adminOrStaff("ORDER_UPDATE"), refundOrder);
@@ -63,6 +66,7 @@ router.patch("/:id/refund", authMiddleware, adminOrStaff("ORDER_UPDATE"), refund
 // Admin Order (place on behalf of customer)
 router.get("/admin-order/search-customers", authMiddleware, adminOrSuperAdmin, searchCustomersForOrder);
 router.get("/admin-order/check-customer", authMiddleware, adminOrSuperAdmin, checkCustomerExists);
+router.get("/admin-order/check-recent-order", authMiddleware, adminOrSuperAdmin, checkRecentOrderForCustomer);
 router.get("/admin-order/products", authMiddleware, adminOrSuperAdmin, getProductsForAdminOrder);
 router.post("/admin-order/place", authMiddleware, adminOrSuperAdmin, placeAdminOrder);
 router.get("/admin-order/lookup-pincode/:pincode", authMiddleware, adminOrSuperAdmin, lookupPincode);

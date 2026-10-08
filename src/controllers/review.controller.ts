@@ -36,8 +36,8 @@ async function recalcProductRating(productId: string): Promise<void> {
   await prisma.product.update({
     where: { id: productId },
     data: {
-      rating: Math.round((stats._avg.rating ?? 0) * 10) / 10,
-      numReviews: stats._count.rating,
+      rating: Math.round((stats._avg?.rating ?? 0) * 10) / 10,
+      numReviews: stats._count?.rating ?? 0,
     },
   });
 }
@@ -54,8 +54,8 @@ async function recalcVariantRating(variantId: string): Promise<void> {
   await prisma.productVariant.update({
     where: { id: variantId },
     data: {
-      rating: Math.round((stats._avg.rating ?? 0) * 10) / 10,
-      numReviews: stats._count.rating,
+      rating: Math.round((stats._avg?.rating ?? 0) * 10) / 10,
+      numReviews: stats._count?.rating ?? 0,
     },
   });
 }
@@ -129,14 +129,23 @@ export const getMyReview = async (req: Request, res: Response) => {
     const variantId = req.query.variantId ? String(req.query.variantId) : null;
     const userId = req.user!.id;
 
-    const review = await prisma.review.findFirst({
-      where: { userId, productId, variantId },
-    });
+    let review = null;
+    if (variantId) {
+      review = await prisma.review.findFirst({
+        where: { userId, productId, variantId },
+      });
+    }
+
+    if (!review) {
+      review = await prisma.review.findFirst({
+        where: { userId, productId },
+      });
+    }
 
     // Also check if eligible to review (relaxed to allow immediate testing for registered customer/admin accounts)
     const canReview = req.user!.role === "CUSTOMER" || req.user!.role === "ADMIN" || req.user!.role === "SUPER_ADMIN";
 
-    return res.json({ review, canReview });
+    return res.json({ review, canReview, currentUserId: userId });
   } catch (err) {
     logger.error("getMyReview error", err);
     return res.status(500).json({ message: "Server error" });
@@ -280,7 +289,8 @@ export const deleteReview = async (req: Request, res: Response) => {
     if (!review) return res.status(404).json({ message: "Review not found." });
 
     // Customers can only delete their own; admins/super_admins can delete any
-    if (role === "CUSTOMER" && review.userId !== userId) {
+    const isOwner = String(review.userId) === String(userId);
+    if (role === "CUSTOMER" && !isOwner) {
       return res.status(403).json({ message: "You can only delete your own review." });
     }
     if (role === "STAFF") {
@@ -294,7 +304,7 @@ export const deleteReview = async (req: Request, res: Response) => {
     // Only when an admin/super-admin removes someone ELSE's review — a customer
     // deleting their own is routine self-service, not a moderation action worth
     // an audit trail entry.
-    if (role !== "CUSTOMER" && review.userId !== userId) {
+    if (role !== "CUSTOMER" && !isOwner) {
       await createAuditLog({
         req,
         action: "DELETE_REVIEW",

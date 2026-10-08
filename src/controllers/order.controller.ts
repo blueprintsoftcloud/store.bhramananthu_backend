@@ -1,7 +1,7 @@
 import { Request, Response } from "express";
 import crypto from "crypto";
 import mongoose from "mongoose";
-import { User, Order, Cart, Product, PaymentLog, StaffProfile, Role, OrderStatus, NotificationType } from "../models/mongoose";
+import { User, Order, OrderItem, Cart, Product, PaymentLog, StaffProfile, Role, OrderStatus, NotificationType, Address } from "../models/mongoose";
 import razorpay from "../config/razorpay";
 import { calculateShippingWithConfig } from "../services/shipping.service";
 import { env } from "../config/env";
@@ -92,7 +92,7 @@ const itemPrice = (item: any): number => {
   const base = item.variant?.priceOverride ?? item.product.price;
   // A variant's own discount (e.g. a promo on just the 50ml bottle) wins over the
   // product-level one — see mongoose.ts's ProductVariant discountOverride.
-  const discount = item.variant?.discountOverride ?? item.product.discount;
+  const discount = item.variant ? (item.variant.discountOverride ?? 0) : item.product.discount;
   if (!discount || discount <= 0) return base;
   const raw = base * (1 - discount / 100);
   const round = Math.round(raw);
@@ -1149,7 +1149,7 @@ export const getOrders = async (req: Request, res: Response) => {
 // GET /api/orders/admin?page=1&limit=20&status=&source=&placedBy=&search=  (admin/staff)
 export const getOrdersForAdmin = async (req: Request, res: Response) => {
   try {
-    const { page = "1", limit = "20", status, source, placedBy, search, invoicePrinted } = req.query as Record<string, string | undefined>;
+    const { page = "1", limit = "20", status, source, placedBy, search, invoicePrinted, startDate, endDate } = req.query as Record<string, string | undefined>;
 
     const pageSize = Math.min(Math.max(parseInt(limit ?? "20") || 20, 1), 100);
     const skip = (Math.max(parseInt(page ?? "1") || 1, 1) - 1) * pageSize;
@@ -1173,6 +1173,32 @@ export const getOrdersForAdmin = async (req: Request, res: Response) => {
       where.invoicePrinted = { not: true };
       if (!status) {
         where.orderStatus = { not: "CANCELLED" };
+      }
+    }
+
+    if (startDate && startDate.trim()) {
+      const start = new Date(startDate.trim());
+      if (!isNaN(start.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(startDate.trim())) {
+          start.setUTCHours(0, 0, 0, 0);
+        }
+        where.createdAt = {
+          ...(where.createdAt || {}),
+          gte: start,
+        };
+      }
+    }
+
+    if (endDate && endDate.trim()) {
+      const end = new Date(endDate.trim());
+      if (!isNaN(end.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+          end.setUTCHours(23, 59, 59, 999);
+        }
+        where.createdAt = {
+          ...(where.createdAt || {}),
+          lte: end,
+        };
       }
     }
 
@@ -1303,7 +1329,7 @@ export const getOrdersForAdmin = async (req: Request, res: Response) => {
 // order table can see accurate totals for it.
 export const getOrderStats = async (req: Request, res: Response) => {
   try {
-    const { status, source, placedBy, invoicePrinted } = req.query as Record<string, string | undefined>;
+    const { status, source, placedBy, invoicePrinted, startDate, endDate } = req.query as Record<string, string | undefined>;
     const match: Record<string, any> = {};
 
     if (status) {
@@ -1327,6 +1353,30 @@ export const getOrderStats = async (req: Request, res: Response) => {
       if (!status) {
         match.orderStatus = { $ne: "CANCELLED" };
       }
+    }
+
+    const dateMatch: Record<string, any> = {};
+    if (startDate && startDate.trim()) {
+      const start = new Date(startDate.trim());
+      if (!isNaN(start.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(startDate.trim())) {
+          start.setUTCHours(0, 0, 0, 0);
+        }
+        dateMatch.$gte = start;
+      }
+    }
+    if (endDate && endDate.trim()) {
+      const end = new Date(endDate.trim());
+      if (!isNaN(end.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+          end.setUTCHours(23, 59, 59, 999);
+        }
+        dateMatch.$lte = end;
+      }
+    }
+
+    if (Object.keys(dateMatch).length > 0) {
+      match.createdAt = dateMatch;
     }
 
     const pipeline: any[] = [];
@@ -1362,6 +1412,10 @@ export const getOrderStats = async (req: Request, res: Response) => {
       unprintedMatch.placedByAdminId = { $ne: null };
     } else if (source === "CUSTOMER") {
       unprintedMatch.placedByAdminId = null;
+    }
+
+    if (Object.keys(dateMatch).length > 0) {
+      unprintedMatch.createdAt = dateMatch;
     }
 
     const [facetResult, unprintedCount] = await Promise.all([
@@ -1622,6 +1676,222 @@ export const updateStatus = async (req: Request, res: Response) => {
   }
 };
 
+// PUT /api/orders/bulk-update-status (admin or staff with ORDER_UPDATE permission)
+export const bulkUpdateStatus = async (req: Request, res: Response) => {
+  try {
+    const { orderIds, orderStatus } = req.body as {
+      orderIds: string[];
+      orderStatus: OrderStatus;
+    };
+    const adminId = req.user!.id;
+
+    if (!orderIds || !Array.isArray(orderIds) || orderIds.length === 0) {
+      return res.status(400).json({ message: "No orders selected for update" });
+    }
+
+    const validStatuses: OrderStatus[] = ["PROCESSING", "CONFIRMED", "SHIPPED", "DELIVERED", "CANCELLED"];
+    if (!orderStatus || !validStatuses.includes(orderStatus)) {
+      return res.status(400).json({ message: "Invalid order status provided" });
+    }
+
+    const orders = await prisma.order.findMany({
+      where: { id: { in: orderIds } },
+      include: { items: true },
+    });
+
+    if (!orders || orders.length === 0) {
+      return res.status(404).json({ message: "No matching orders found" });
+    }
+
+    let successCount = 0;
+    let alreadyInStatusCount = 0;
+    let skippedCancelledCount = 0;
+    let skippedDeliveredCount = 0;
+    const errors: string[] = [];
+
+    const admin = await prisma.user.findUnique({
+      where: { id: adminId },
+      select: { username: true },
+    });
+    const adminName = admin?.username || "Admin";
+
+    for (const order of orders) {
+      try {
+        if (order.orderStatus === orderStatus) {
+          alreadyInStatusCount++;
+          continue;
+        }
+
+        // Strictly disallow changing CANCELLED or RETURNED orders
+        if (order.orderStatus === "CANCELLED" || order.orderStatus === "RETURNED") {
+          skippedCancelledCount++;
+          errors.push(`Order #${order.id.slice(-6)} is cancelled and cannot be changed`);
+          continue;
+        }
+
+        // Strictly disallow changing already DELIVERED orders
+        if (order.orderStatus === "DELIVERED") {
+          skippedDeliveredCount++;
+          errors.push(`Order #${order.id.slice(-6)} is already delivered and cannot be changed`);
+          continue;
+        }
+
+        if (orderStatus === "CANCELLED") {
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { orderStatus: "CANCELLED" },
+          });
+
+          await restoreStock({
+            orderId: order.id,
+            items: order.items.map((item: any) => ({
+              productId: item.productId,
+              variantId: item.variantId ?? null,
+              quantity: item.quantity,
+            })),
+          });
+
+          await prisma.paymentLog.create({
+            data: {
+              orderId: order.id,
+              userId: order.userId,
+              event: "ORDER_CANCELLED",
+              paymentMethod: order.paymentMethod,
+              paymentStatus: order.paymentStatus,
+              amount: order.finalAmount,
+              gatewayResponse: { cancelledBy: adminId, bulkUpdate: true },
+              signatureValid: null,
+              ipAddress: req.ip ?? null,
+            },
+          });
+        } else if (orderStatus === "SHIPPED") {
+          // Fast bulk shipping: no courier URL/tracking link required
+          await prisma.order.update({
+            where: { id: order.id },
+            data: {
+              orderStatus: "SHIPPED",
+              shippedAt: new Date(),
+              noDeliveryPartner: true,
+            },
+          });
+        } else if (orderStatus === "DELIVERED") {
+          const isPending = order.paymentStatus === "PENDING";
+          await prisma.order.update({
+            where: { id: order.id },
+            data: {
+              orderStatus: "DELIVERED",
+              deliveredAt: new Date(),
+              paymentStatus: isPending ? "PAID" : order.paymentStatus,
+            },
+          });
+
+          if (isPending) {
+            await prisma.paymentLog.create({
+              data: {
+                orderId: order.id,
+                userId: order.userId,
+                event: "PAYMENT_COLLECTED_ON_DELIVERY",
+                paymentMethod: order.paymentMethod,
+                paymentStatus: "PAID",
+                amount: order.finalAmount,
+                gatewayResponse: { collectedBy: adminId, bulkUpdate: true },
+                signatureValid: null,
+                ipAddress: req.ip ?? null,
+              },
+            });
+          }
+        } else {
+          // PROCESSING / CONFIRMED
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { orderStatus },
+          });
+        }
+
+        const shortId = order.id.slice(-6);
+        void (async () => {
+          try {
+            await notifyUsers(req, order.id, `Your order #${shortId} status has been updated to: ${orderStatus}`, "ORDER_UPDATE", adminId, [order.userId]);
+            
+            const user = await prisma.user.findUnique({
+              where: { id: order.userId },
+              select: { email: true, username: true },
+            });
+            if (user?.email) {
+              await sendEmail({
+                to: user.email,
+                toName: user.username,
+                ...orderStatusEmailPayload(shortId, orderStatus, user.username),
+              });
+            }
+          } catch (bgErr) {
+            logger.warn(`Bulk status update notification error for order ${order.id}:`, bgErr);
+          }
+        })();
+
+        successCount++;
+      } catch (orderErr: any) {
+        logger.error(`Error updating order ${order.id} in bulk:`, orderErr);
+        errors.push(`Order #${order.id.slice(-6)} failed to update`);
+      }
+    }
+
+    if (successCount > 0) {
+      await createAuditLog({
+        req,
+        action: "UPDATE_ORDER_STATUS_BULK",
+        entity: "Order",
+        details: { targetStatus: orderStatus, requestedCount: orderIds.length, successCount },
+      });
+
+      const adminIds = await getAdminRecipients();
+      await notifyUsers(req, "", `Admin ${adminName} bulk-updated ${successCount} order(s) to ${orderStatus}`, "ORDER_UPDATE", adminId, adminIds);
+    }
+
+    if (successCount === 0) {
+      if (alreadyInStatusCount === orders.length) {
+        return res.status(200).json({
+          message: `Selected order(s) are already ${orderStatus}`,
+          successCount: 0,
+        });
+      }
+      if (skippedCancelledCount > 0) {
+        return res.status(400).json({
+          message: "Cancelled orders cannot have their status changed.",
+          successCount: 0,
+          errors,
+        });
+      }
+      if (skippedDeliveredCount > 0) {
+        return res.status(400).json({
+          message: "Delivered orders cannot have their status changed.",
+          successCount: 0,
+          errors,
+        });
+      }
+      return res.status(400).json({
+        message: errors[0] || "No orders could be updated.",
+        successCount: 0,
+        errors,
+      });
+    }
+
+    const skippedNote = skippedCancelledCount > 0
+      ? ` (${skippedCancelledCount} cancelled order(s) skipped)`
+      : "";
+
+    res.status(200).json({
+      message: `Successfully updated ${successCount} order(s) to ${orderStatus}${skippedNote}`,
+      successCount,
+      alreadyInStatusCount,
+      errors: errors.length > 0 ? errors : undefined,
+    });
+  } catch (err: any) {
+    logger.error("bulkUpdateStatus error", err);
+    res.status(500).json({ message: "Failed to update order statuses in bulk", error: err.message });
+  }
+};
+
 // GET /api/orders/my-transactions?page=1&limit=10  (authenticated customer)
 export const getMyTransactions = async (req: Request, res: Response) => {
   try {
@@ -1787,7 +2057,7 @@ export const getOrderById = async (req: Request, res: Response) => {
         placedByAdmin: { select: { id: true, username: true, email: true, role: true } },
         items: {
           include: {
-            product: { select: { id: true, name: true, image: true, price: true, code: true } },
+            product: { select: { id: true, name: true, image: true, price: true, discount: true, code: true } },
             // See getOrders's identical include — which option was purchased.
             variant: true,
           },
@@ -1850,7 +2120,7 @@ export const getBulkInvoices = async (req: Request, res: Response) => {
         placedByAdmin: { select: { id: true, username: true, email: true, role: true } },
         items: {
           include: {
-            product: { select: { id: true, name: true, image: true, price: true, code: true } },
+            product: { select: { id: true, name: true, image: true, price: true, discount: true, code: true } },
             variant: true,
           },
         },
@@ -1896,6 +2166,44 @@ export const markInvoicesPrinted = async (req: Request, res: Response) => {
 
 // ─── Admin Place Order on Behalf of Customer ──────────────────────────────────
 
+// Helper: Get recent order delivery address or saved address for a customer
+const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId) => {
+  try {
+    const lastOrder = await Order.findOne({ userId })
+      .sort({ createdAt: -1 })
+      .select("shippingAddress")
+      .lean();
+
+    if (lastOrder?.shippingAddress && (lastOrder.shippingAddress.fullAddress || lastOrder.shippingAddress.address)) {
+      const sa = lastOrder.shippingAddress;
+      return {
+        fullAddress: sa.fullAddress || sa.address || sa.street || "",
+        city: sa.city || "",
+        state: sa.state || "",
+        zipCode: sa.zipCode || sa.pincode || sa.pinCode || "",
+        country: sa.country || "India",
+      };
+    }
+
+    const savedAddr = await Address.findOne({ userId })
+      .sort({ isDefault: -1, createdAt: -1 })
+      .lean();
+
+    if (savedAddr && savedAddr.fullAddress) {
+      return {
+        fullAddress: savedAddr.fullAddress || "",
+        city: savedAddr.city || "",
+        state: savedAddr.state || "",
+        zipCode: savedAddr.zipCode || "",
+        country: savedAddr.country || "India",
+      };
+    }
+  } catch (err) {
+    logger.warn("getCustomerRecentAddress error", err);
+  }
+  return null;
+};
+
 // GET /api/orders/admin-order/search-customers?q=   (admin / super-admin)
 // Search existing customers by name, phone, or email.
 export const searchCustomersForOrder = async (req: Request, res: Response) => {
@@ -1903,19 +2211,33 @@ export const searchCustomersForOrder = async (req: Request, res: Response) => {
     const q = (req.query.q as string | undefined)?.trim() ?? "";
     if (!q) return res.json({ customers: [] });
 
-    const customers = await prisma.user.findMany({
-      where: {
-        role: "CUSTOMER",
-        OR: [
-          { username: { contains: q, mode: "insensitive" } },
-          { email:    { contains: q, mode: "insensitive" } },
-          { phone:    { contains: q, mode: "insensitive" } },
-        ],
-      },
-      select: { id: true, username: true, email: true, phone: true },
-      take: 10,
-    });
-    res.json({ customers });
+    const customers = await User.find({
+      role: "CUSTOMER",
+      $or: [
+        { username: { $regex: q, $options: "i" } },
+        { email:    { $regex: q, $options: "i" } },
+        { phone:    { $regex: q, $options: "i" } },
+      ],
+    })
+      .select("id username email phone")
+      .limit(10)
+      .lean();
+
+    const customersWithAddress = await Promise.all(
+      customers.map(async (c: any) => {
+        const customerId = c._id ? String(c._id) : String(c.id);
+        const recentAddress = await getCustomerRecentAddress(customerId);
+        return {
+          id: customerId,
+          username: c.username,
+          email: c.email ?? null,
+          phone: c.phone ?? null,
+          recentAddress,
+        };
+      })
+    );
+
+    res.json({ customers: customersWithAddress });
   } catch (err: any) {
     logger.error("searchCustomersForOrder error", err);
     res.status(500).json({ message: "Search failed" });
@@ -1937,23 +2259,144 @@ export const checkCustomerExists = async (req: Request, res: Response) => {
     if (phone) conditions.push({ phone });
     if (email) conditions.push({ email });
 
-    const customer = await prisma.user.findFirst({
-      where: {
-        role: "CUSTOMER",
-        OR: conditions,
-      },
-      select: { id: true, username: true, email: true, phone: true },
-    });
+    const customer = await User.findOne({
+      role: "CUSTOMER",
+      $or: conditions,
+    })
+      .select("id username email phone")
+      .lean();
 
     if (customer) {
+      const customerId = customer._id ? String(customer._id) : String(customer.id);
+      const recentAddress = await getCustomerRecentAddress(customerId);
       const matchType = phone && customer.phone === phone ? "phone" : "email";
-      return res.json({ exists: true, matchType, customer });
+      return res.json({
+        exists: true,
+        matchType,
+        customer: {
+          id: customerId,
+          username: customer.username,
+          email: customer.email ?? null,
+          phone: customer.phone ?? null,
+          recentAddress,
+        },
+      });
     }
 
     return res.json({ exists: false, customer: null });
   } catch (err: any) {
     logger.error("checkCustomerExists error", err);
     res.status(500).json({ message: "Customer check failed" });
+  }
+};
+
+// GET /api/orders/admin-order/check-recent-order?customerId=&phone=&email=  (admin / super-admin)
+// Checks if a customer has placed an order in the last 24 hours.
+export const checkRecentOrderForCustomer = async (req: Request, res: Response) => {
+  try {
+    const customerId = (req.query.customerId as string | undefined)?.trim();
+    const phone = (req.query.phone as string | undefined)?.trim();
+    const email = (req.query.email as string | undefined)?.trim().toLowerCase();
+
+    let targetUserId: string | null = null;
+    let customerName: string = "";
+
+    if (customerId) {
+      const user = await User.findById(customerId).select("id username").lean();
+      if (user) {
+        targetUserId = String((user as any)._id || (user as any).id);
+        customerName = (user as any).username;
+      }
+    } else if (phone || email) {
+      const conditions: any[] = [];
+      if (phone) conditions.push({ phone });
+      if (email) conditions.push({ email });
+
+      const user = await User.findOne({
+        role: "CUSTOMER",
+        $or: conditions,
+      }).select("id username").lean();
+
+      if (user) {
+        targetUserId = String((user as any)._id || (user as any).id);
+        customerName = (user as any).username;
+      }
+    }
+
+    if (!targetUserId) {
+      return res.json({ hasRecentOrder: false, order: null });
+    }
+
+    const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+    const userObjectId = mongoose.Types.ObjectId.isValid(targetUserId)
+      ? new mongoose.Types.ObjectId(targetUserId)
+      : targetUserId;
+
+    const recentOrder = await Order.findOne({
+      userId: { $in: [userObjectId, String(targetUserId)] },
+      createdAt: { $gte: twentyFourHoursAgo },
+      orderStatus: { $ne: "CANCELLED" },
+    })
+      .sort({ createdAt: -1 })
+      .lean();
+
+    if (!recentOrder) {
+      return res.json({ hasRecentOrder: false, order: null });
+    }
+
+    const recentOrderId = String((recentOrder as any)._id || (recentOrder as any).id);
+
+    const recentItems = await OrderItem.find({ orderId: (recentOrder as any)._id })
+      .populate<{ productId: { name: string } }>("productId", "name")
+      .lean();
+
+    const itemsSummary = recentItems
+      .map((i: any) => `${i.productId?.name || "Item"} (x${i.quantity})`)
+      .join(", ") || `${recentItems.length || 1} item(s)`;
+
+    const orderDate = new Date(recentOrder.createdAt);
+    const formattedTime = orderDate.toLocaleString("en-IN", {
+      timeZone: "Asia/Kolkata",
+      day: "2-digit",
+      month: "short",
+      year: "numeric",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: true,
+    });
+
+    const diffMs = Math.max(0, Date.now() - orderDate.getTime());
+    const diffMins = Math.floor(diffMs / 60000);
+    const hours = Math.floor(diffMins / 60);
+    const mins = diffMins % 60;
+    let relativeTime = "Just now";
+    if (hours > 0) {
+      relativeTime = `${hours} hr${hours > 1 ? "s" : ""}${mins > 0 ? ` ${mins} min${mins > 1 ? "s" : ""}` : ""} ago`;
+    } else if (diffMins > 0) {
+      relativeTime = `${diffMins} min${diffMins > 1 ? "s" : ""} ago`;
+    }
+
+    return res.json({
+      hasRecentOrder: true,
+      order: {
+        id: recentOrderId,
+        shortId: recentOrderId.slice(-6).toUpperCase(),
+        createdAt: recentOrder.createdAt,
+        formattedTime,
+        relativeTime,
+        finalAmount: recentOrder.finalAmount,
+        totalAmount: recentOrder.totalAmount,
+        orderStatus: recentOrder.orderStatus,
+        paymentMethod: recentOrder.paymentMethod,
+        placedByAdmin: !!(recentOrder as any).placedByAdminId,
+        itemsCount: recentItems.length,
+        itemsSummary,
+        customerName: customerName || ((recentOrder as any).shippingAddress?.fullName || "Customer"),
+      },
+    });
+  } catch (err: any) {
+    logger.error("checkRecentOrderForCustomer error", err);
+    res.status(500).json({ message: "Failed to check recent order" });
   }
 };
 
@@ -1973,7 +2416,7 @@ export const getProductsForAdminOrder = async (req: Request, res: Response) => {
       prisma.product.findMany({
         where,
         select: {
-          id: true, name: true, code: true, image: true, price: true, stock: true,
+          id: true, name: true, code: true, image: true, description: true, price: true, stock: true,
           category: { select: { id: true, name: true } },
         },
         orderBy: { name: "asc" },
@@ -2034,14 +2477,16 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       paymentMethod = "CASH",
       paymentNote,
       couponId,
+      bypassRecentOrderWarning,
     } = req.body as {
       customerId?: string;
       newCustomer?: { username: string; phone: string; email?: string };
       items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
-      address: { fullAddress: string; city: string; state: string; zipCode: string; country: string };
+      address?: { fullAddress?: string; city?: string; state?: string; zipCode?: string; country?: string };
       paymentMethod: "CASH" | "POD";
       paymentNote?: string;
       couponId?: string;
+      bypassRecentOrderWarning?: boolean;
     };
 
     // ── 1. Resolve customer ──────────────────────────────────────────────────
@@ -2137,6 +2582,75 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       return res.status(400).json({ message: "Provide either customerId or newCustomer details" });
     }
 
+    // ── 1b. Check if customer already placed an order in the last 24 hours ────
+    if (!bypassRecentOrderWarning) {
+      const twentyFourHoursAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
+      const userObjectId = mongoose.Types.ObjectId.isValid(customer.id)
+        ? new mongoose.Types.ObjectId(customer.id)
+        : customer.id;
+
+      const recentOrder = await Order.findOne({
+        userId: { $in: [userObjectId, String(customer.id)] },
+        createdAt: { $gte: twentyFourHoursAgo },
+        orderStatus: { $ne: "CANCELLED" },
+      })
+        .sort({ createdAt: -1 })
+        .lean();
+
+      if (recentOrder) {
+        const recentOrderId = String((recentOrder as any)._id || (recentOrder as any).id);
+        const recentItems = await OrderItem.find({ orderId: (recentOrder as any)._id })
+          .populate<{ productId: { name: string } }>("productId", "name")
+          .lean();
+
+        const itemsSummary = recentItems
+          .map((i: any) => `${i.productId?.name || "Item"} (x${i.quantity})`)
+          .join(", ") || `${recentItems.length || 1} item(s)`;
+
+        const orderDate = new Date(recentOrder.createdAt);
+        const formattedTime = orderDate.toLocaleString("en-IN", {
+          timeZone: "Asia/Kolkata",
+          day: "2-digit",
+          month: "short",
+          year: "numeric",
+          hour: "2-digit",
+          minute: "2-digit",
+          hour12: true,
+        });
+
+        const diffMs = Math.max(0, Date.now() - orderDate.getTime());
+        const diffMins = Math.floor(diffMs / 60000);
+        const hours = Math.floor(diffMins / 60);
+        const mins = diffMins % 60;
+        let relativeTime = "Just now";
+        if (hours > 0) {
+          relativeTime = `${hours} hr${hours > 1 ? "s" : ""}${mins > 0 ? ` ${mins} min${mins > 1 ? "s" : ""}` : ""} ago`;
+        } else if (diffMins > 0) {
+          relativeTime = `${diffMins} min${diffMins > 1 ? "s" : ""} ago`;
+        }
+
+        return res.status(409).json({
+          code: "RECENT_ORDER_EXISTS_24H",
+          message: "This customer has already placed an order in the last 24 hours.",
+          recentOrder: {
+            id: recentOrderId,
+            shortId: recentOrderId.slice(-6).toUpperCase(),
+            createdAt: recentOrder.createdAt,
+            formattedTime,
+            relativeTime,
+            finalAmount: recentOrder.finalAmount,
+            totalAmount: recentOrder.totalAmount,
+            orderStatus: recentOrder.orderStatus,
+            paymentMethod: recentOrder.paymentMethod,
+            placedByAdmin: !!(recentOrder as any).placedByAdminId,
+            itemsCount: recentItems.length,
+            itemsSummary,
+            customerName: customer.username,
+          },
+        });
+      }
+    }
+
     // ── 2. Validate + price items ────────────────────────────────────────────
     if (!items?.length) return res.status(400).json({ message: "At least one item is required" });
 
@@ -2211,11 +2725,11 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
           orderStatus: "CONFIRMED",
           couponId: resolvedCouponId,
           shippingAddress: {
-            fullAddress: address.fullAddress,
-            city: address.city,
-            state: address.state,
-            zipCode: address.zipCode,
-            country: address.country || "India",
+            fullAddress: address?.fullAddress?.trim() || "",
+            city: address?.city?.trim() || "",
+            state: address?.state?.trim() || "",
+            zipCode: address?.zipCode?.trim() || "",
+            country: address?.country?.trim() || "India",
           },
           items: { create: orderItems },
         },

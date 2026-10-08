@@ -1,0 +1,1 @@
+const t=new Set(["NEW_ORDER","ORDER_UPDATE","PAYMENT_SUCCESS","PAYMENT_FAILED"]);function i(e,r){return e.order?.id&&t.has(e.type??"")?`${r}/order-management?orderId=${e.order.id}`:e.type==="LOW_STOCK"?`${r}/manage-catalog`:e.type==="GENERAL"&&r==="/super-admin-dashboard"?`${r}/monitoring`:`${r}/notifications`}export{i as g};
