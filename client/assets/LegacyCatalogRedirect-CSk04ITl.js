@@ -1,1 +1,0 @@
-import{e as r,av as c,j as n,ax as i}from"./index-BkjEsZv4.js";function p({toSuffix:a}){const e=r(),t=c(),s=e.pathname.split("/").slice(0,2).join("/"),o=t.categoryId?a.replace(":categoryId",t.categoryId):a;return n.jsx(i,{to:`${s}/${o}`,replace:!0,state:e.state})}export{p as default};
