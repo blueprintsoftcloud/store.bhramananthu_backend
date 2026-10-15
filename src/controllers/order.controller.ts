@@ -2170,7 +2170,12 @@ export const markInvoicesPrinted = async (req: Request, res: Response) => {
 // Helper: Get recent order delivery address or saved address for a customer
 const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId) => {
   try {
-    const lastOrder = await Order.findOne({ userId })
+    const userConditions: any[] = [{ userId }];
+    if (typeof userId === "string" && mongoose.Types.ObjectId.isValid(userId)) {
+      userConditions.push({ userId: new mongoose.Types.ObjectId(userId) });
+    }
+
+    const lastOrder = await Order.findOne({ $or: userConditions })
       .sort({ createdAt: -1 })
       .select("shippingAddress")
       .lean();
@@ -2183,10 +2188,11 @@ const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId
         state: sa.state || "",
         zipCode: sa.zipCode || sa.pincode || sa.pinCode || "",
         country: sa.country || "India",
+        secondaryPhone: sa.secondaryPhone || "",
       };
     }
 
-    const savedAddr = await Address.findOne({ userId })
+    const savedAddr = await Address.findOne({ $or: userConditions })
       .sort({ isDefault: -1, createdAt: -1 })
       .lean();
 
@@ -2197,6 +2203,7 @@ const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId
         state: savedAddr.state || "",
         zipCode: savedAddr.zipCode || "",
         country: savedAddr.country || "India",
+        secondaryPhone: (savedAddr as any).secondaryPhone || "",
       };
     }
   } catch (err) {
