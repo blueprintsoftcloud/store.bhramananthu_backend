@@ -505,9 +505,9 @@ Response 200: { "message": "Credentials verified. OTP sent to your email.", "ste
 | GET | `/all` | ADMIN/STAFF(ORDER_VIEW) | All orders (admin view, paginated, filterable) |
 | GET | `/customer-transactions` | ADMIN/STAFF(ORDER_VIEW) | All customer transactions |
 | PUT | `/update/:id` | ADMIN/STAFF(ORDER_UPDATE) | Update order status |
-| GET | `/admin-order/search-customers` | ADMIN | Search customers for admin order |
-| GET | `/admin-order/products` | ADMIN | Get products for admin order form |
-| POST | `/admin-order/place` | ADMIN | Place order on behalf of customer |
+| GET | `/admin-order/search-customers` | ADMIN/STAFF(ORDER_CREATE) | Search customers for admin order |
+| GET | `/admin-order/products` | ADMIN/STAFF(ORDER_CREATE) | Get products for admin order form |
+| POST | `/admin-order/place` | ADMIN/STAFF(ORDER_CREATE) | Place order on behalf of customer |
 | GET | `/:id` | AUTH | Get single order (customer gets own, admin gets any) |
 
 **Order Status Transitions:** `PROCESSING → CONFIRMED → SHIPPED → DELIVERED` (or `CANCELLED`)
@@ -589,7 +589,7 @@ All require `ADMIN + REPORTS_ANALYTICS feature enabled`
 | PATCH | `/:id/toggle` | ADMIN | Activate/deactivate staff account |
 | DELETE | `/:id` | ADMIN | Delete staff |
 
-**Staff Permissions:** `CATEGORY_VIEW`, `CATEGORY_ADD`, `CATEGORY_EDIT`, `CATEGORY_DELETE`, `PRODUCT_VIEW`, `PRODUCT_ADD`, `PRODUCT_EDIT`, `PRODUCT_DELETE`, `ORDER_VIEW`, `ORDER_UPDATE`
+**Staff Permissions:** `CATEGORY_VIEW`, `CATEGORY_ADD`, `CATEGORY_EDIT`, `CATEGORY_DELETE`, `PRODUCT_VIEW`, `PRODUCT_ADD`, `PRODUCT_EDIT`, `PRODUCT_DELETE`, `ORDER_VIEW`, `ORDER_UPDATE`, `ORDER_CREATE`
 
 ---
 

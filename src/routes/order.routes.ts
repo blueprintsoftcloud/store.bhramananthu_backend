@@ -28,7 +28,6 @@ import {
 import { authMiddleware } from "../middleware/auth.middleware";
 import { uploadScreenshot } from "../middleware/upload";
 import { adminOrStaff } from "../middleware/staffPermission.middleware";
-import { adminOrSuperAdmin } from "../middleware/admin.middleware";
 import { validate } from "../middleware/validate.middleware";
 import { verifyPaymentSchema, updateOrderStatusSchema } from "../schemas/order.schema";
 
@@ -63,13 +62,13 @@ router.get("/customer-transactions", authMiddleware, adminOrStaff("ORDER_VIEW"),
 router.put("/update/:id", authMiddleware, adminOrStaff("ORDER_UPDATE"), validate(updateOrderStatusSchema), updateStatus);
 router.patch("/:id/refund", authMiddleware, adminOrStaff("ORDER_UPDATE"), refundOrder);
 
-// Admin Order (place on behalf of customer)
-router.get("/admin-order/search-customers", authMiddleware, adminOrSuperAdmin, searchCustomersForOrder);
-router.get("/admin-order/check-customer", authMiddleware, adminOrSuperAdmin, checkCustomerExists);
-router.get("/admin-order/check-recent-order", authMiddleware, adminOrSuperAdmin, checkRecentOrderForCustomer);
-router.get("/admin-order/products", authMiddleware, adminOrSuperAdmin, getProductsForAdminOrder);
-router.post("/admin-order/place", authMiddleware, adminOrSuperAdmin, placeAdminOrder);
-router.get("/admin-order/lookup-pincode/:pincode", authMiddleware, adminOrSuperAdmin, lookupPincode);
+// Admin / Staff Order (place on behalf of customer)
+router.get("/admin-order/search-customers", authMiddleware, adminOrStaff("ORDER_CREATE"), searchCustomersForOrder);
+router.get("/admin-order/check-customer", authMiddleware, adminOrStaff("ORDER_CREATE"), checkCustomerExists);
+router.get("/admin-order/check-recent-order", authMiddleware, adminOrStaff("ORDER_CREATE"), checkRecentOrderForCustomer);
+router.get("/admin-order/products", authMiddleware, adminOrStaff("ORDER_CREATE"), getProductsForAdminOrder);
+router.post("/admin-order/place", authMiddleware, adminOrStaff("ORDER_CREATE"), placeAdminOrder);
+router.get("/admin-order/lookup-pincode/:pincode", authMiddleware, adminOrStaff("ORDER_CREATE"), lookupPincode);
 
 router.get("/:id", authMiddleware, getOrderById); // single order — customer (own) or admin/staff
 

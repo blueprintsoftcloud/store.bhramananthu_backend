@@ -1,6 +1,6 @@
 import { Request, Response } from "express";
 import mongoose from "mongoose";
-import { Product, Category, ProductAttributeValue, OrderItem, ProductVariant } from "../models/mongoose";
+import { Product, Category, ProductAttributeValue, OrderItem, ProductVariant, AuditLog } from "../models/mongoose";
 import { deleteFromCloudinary, uploadToCloudinary } from "../config/cloudinary";
 import logger from "../utils/logger";
 import { createAuditLog } from "../utils/auditLog";
@@ -674,10 +674,45 @@ export const productAdminDetail = async (req: Request, res: Response) => {
       logger.warn("productAdminDetail: salesAggregate failed, falling back to 0", salesErr);
     }
 
+    // Query recent stock adjustment audit logs for this product
+    let stockHistory: any[] = [];
+    try {
+      const logs = await AuditLog.find({
+        entity: "Product",
+        entityId: id,
+        action: "UPDATE_PRODUCT_STOCK",
+      })
+        .sort({ createdAt: -1 })
+        .limit(30)
+        .lean();
+
+      const userIds = [...new Set(logs.map((l: any) => l.userId).filter(Boolean))];
+      const users: any[] = await (prisma.user as any).findMany({
+        where: { id: { in: userIds.map(String) } },
+        select: { id: true, name: true, email: true, role: true },
+      });
+      const userMap = new Map(users.map((u: any) => [String(u.id), u]));
+
+      stockHistory = logs.map((log: any) => {
+        const u: any = log.userId ? userMap.get(String(log.userId)) : null;
+        return {
+          id: String(log._id),
+          action: log.action,
+          createdAt: log.createdAt,
+          performedBy: u ? { name: u.name, email: u.email, role: u.role } : null,
+          ipAddress: log.ipAddress,
+          details: log.details,
+        };
+      });
+    } catch (auditErr) {
+      logger.warn("productAdminDetail: failed to load stockHistory", auditErr);
+    }
+
     res.status(200).json({
       product,
       variants,
       salesStats,
+      stockHistory,
     });
   } catch (err: any) {
     logger.error("productAdminDetail error", err);
@@ -700,22 +735,61 @@ export const quickStockUpdate = async (req: Request, res: Response) => {
     }
 
     const hasVariants = (await prisma.productVariant.count({ where: { productId: id } })) > 0;
+    const changes: Array<{
+      variantId?: string;
+      variantName?: string;
+      oldStock: number;
+      newStock: number;
+      diff: number;
+    }> = [];
 
     if (hasVariants && variantStocks && typeof variantStocks === "object") {
+      const existingVariants = await prisma.productVariant.findMany({
+        where: { productId: id },
+      });
+      const variantMap = new Map((existingVariants as any[]).map((v: any) => [v.id, v]));
+
       // Update individual variant stocks
       for (const [vId, vStock] of Object.entries(variantStocks)) {
         if (typeof vStock === "number" && vStock >= 0) {
-          await prisma.productVariant.update({
-            where: { id: vId },
-            data: { stock: Math.floor(vStock) },
-          });
+          const v: any = variantMap.get(vId);
+          const oldVal = v?.stock ?? 0;
+          const newVal = Math.floor(vStock);
+          if (oldVal !== newVal) {
+            const variantTitle = v?.options
+              ? Object.entries(v.options as Record<string, any>)
+                  .map(([k, val]) => `${k}: ${val}`)
+                  .join(", ")
+              : "Variant";
+            changes.push({
+              variantId: vId,
+              variantName: variantTitle || "Variant",
+              oldStock: oldVal,
+              newStock: newVal,
+              diff: newVal - oldVal,
+            });
+            await prisma.productVariant.update({
+              where: { id: vId },
+              data: { stock: newVal },
+            });
+          }
         }
       }
       await syncProductFromVariants(id);
     } else if (typeof stock === "number" && stock >= 0) {
+      const oldVal = product.stock ?? 0;
+      const newVal = Math.floor(stock);
+      if (oldVal !== newVal) {
+        changes.push({
+          variantName: product.name || "Default Product",
+          oldStock: oldVal,
+          newStock: newVal,
+          diff: newVal - oldVal,
+        });
+      }
       await prisma.product.update({
         where: { id },
-        data: { stock: Math.floor(stock), stockQuantity: Math.floor(stock) },
+        data: { stock: newVal, stockQuantity: newVal },
       });
     }
 
@@ -728,6 +802,7 @@ export const quickStockUpdate = async (req: Request, res: Response) => {
         productName: product.name,
         newStock: stock,
         variantStocks,
+        changes,
       },
     });
 

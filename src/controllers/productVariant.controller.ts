@@ -321,6 +321,35 @@ export const updateVariant = async (req: Request, res: Response) => {
 
     await syncProductFromVariants(productId);
 
+    if (stock !== undefined && (parseInt(stock) || 0) !== existing.stock) {
+      const oldVal = existing.stock;
+      const newVal = parseInt(stock) || 0;
+      const variantTitle = existing.options
+        ? Object.entries(existing.options as Record<string, any>)
+            .map(([k, val]) => `${k}: ${val}`)
+            .join(", ")
+        : "Variant";
+      await createAuditLog({
+        req,
+        action: "UPDATE_PRODUCT_STOCK",
+        entity: "Product",
+        entityId: productId,
+        details: {
+          variantId,
+          variantName: variantTitle,
+          changes: [
+            {
+              variantId,
+              variantName: variantTitle,
+              oldStock: oldVal,
+              newStock: newVal,
+              diff: newVal - oldVal,
+            },
+          ],
+        },
+      });
+    }
+
     // The combination changed — any axis that's currently a customer-facing filter
     // (e.g. Color) needs its tag on THIS variant moved from the old value to the new
     // one, otherwise it'd keep showing under the value it no longer has. Re-derives

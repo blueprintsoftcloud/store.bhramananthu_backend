@@ -16,6 +16,7 @@ export const STAFF_PERMISSIONS = [
   // Order
   "ORDER_VIEW",
   "ORDER_UPDATE",
+  "ORDER_CREATE",
   // Coupon
   "COUPON_VIEW",
   "COUPON_ADD",
@@ -64,6 +65,7 @@ export const PERMISSION_GROUPS = [
     permissions: [
       { key: "ORDER_VIEW" as StaffPermission, label: "View Orders" },
       { key: "ORDER_UPDATE" as StaffPermission, label: "Update Order Status" },
+      { key: "ORDER_CREATE" as StaffPermission, label: "Place Orders (Counter / Customer)" },
     ],
   },
   {
@@ -79,15 +81,6 @@ export const PERMISSION_GROUPS = [
     label: "Reports & Analytics",
     permissions: [
       { key: "ANALYTICS_VIEW" as StaffPermission, label: "View Reports & Analytics" },
-    ],
-  },
-  {
-    label: "Homepage Manager",
-    permissions: [
-      { key: "BANNER_VIEW" as StaffPermission, label: "View Banners / Homepage Config" },
-      { key: "BANNER_ADD" as StaffPermission, label: "Add Banner" },
-      { key: "BANNER_EDIT" as StaffPermission, label: "Edit Banner / Headers / Hero / Footer" },
-      { key: "BANNER_DELETE" as StaffPermission, label: "Delete Banner" },
     ],
   },
   {

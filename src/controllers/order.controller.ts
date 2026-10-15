@@ -1232,6 +1232,7 @@ export const getOrdersForAdmin = async (req: Request, res: Response) => {
         { "shippingAddress.fullName": { contains: q, mode: "insensitive" } },
         { "shippingAddress.name": { contains: q, mode: "insensitive" } },
         { "shippingAddress.phone": { contains: q } },
+        { "shippingAddress.secondaryPhone": { contains: q } },
         { "shippingAddress.city": { contains: q, mode: "insensitive" } },
         // Tracking & payment references
         { trackingId: { contains: q, mode: "insensitive" } },
@@ -2482,7 +2483,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       customerId?: string;
       newCustomer?: { username: string; phone: string; email?: string };
       items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
-      address?: { fullAddress?: string; city?: string; state?: string; zipCode?: string; country?: string };
+      address?: { fullAddress?: string; city?: string; state?: string; zipCode?: string; country?: string; secondaryPhone?: string };
       paymentMethod: "CASH" | "POD";
       paymentNote?: string;
       couponId?: string;
@@ -2730,6 +2731,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
             state: address?.state?.trim() || "",
             zipCode: address?.zipCode?.trim() || "",
             country: address?.country?.trim() || "India",
+            ...(address?.secondaryPhone?.trim() ? { secondaryPhone: address.secondaryPhone.trim() } : {}),
           },
           items: { create: orderItems },
         },
