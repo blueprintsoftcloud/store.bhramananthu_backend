@@ -1,36 +1,48 @@
-3. Terms and Conditions
-Terms and Conditions
-Last updated: 12/10/2026
-These terms apply when you use store.bhramananthu.com or buy from it. The store is operated by Panakkal Ayurveda Pharmacy, Vilanganur, Peechi P.O, Thrissur – 680653, Kerala, India. By placing an order, you agree to these terms.
-About the product
-•	Bhramananthu Oil is an Ayurvedic oil for external use only. Do not swallow.
-•	Use it as described on the pack and on this website, or as advised by an Ayurvedic practitioner.
-•	If you are pregnant, breastfeeding, have a medical condition or take regular medicines, consult your doctor before use.
-•	Keep out of the reach of children.
-Orders
-•	You must be 18 years or older to place an order.
-•	Please give a correct name, phone number and full delivery address. We are not responsible for delays caused by wrong details.
-•	We confirm your order by SMS / WhatsApp / email.
-Prices and payment
-•	All prices are in Indian Rupees (₹) and include all taxes.
-•	Delivery charges, if any, are shown at checkout before you pay.
-•	We accept UPI, debit and credit cards, net banking and cash on delivery. Online payments are processed securely by payment partner.
-•	Pack offers (for example 2 or 3 bottles) are valid only as shown on the website at the time of ordering.
-Shipping, returns and refunds
-Delivery, returns, cancellations and refunds are covered in our Shipping and Returns Policy.
-Reviews
-•	Reviews must be your own honest experience of the product.
-•	We may remove reviews that are false, offensive, or contain personal details or medical claims.
-Website content
-All text, images, videos and the Bhramananthu name and logo belong to Panakkal Ayurveda Pharmacy. Please do not copy or use them without our written permission.
-Limitation of liability
-We are responsible for providing the product as described. We are not liable for problems caused by using the product against the directions, or for delays caused by courier partners or events outside our control, such as floods or strikes.
-Changes to these terms
-We may update these terms from time to time. The version on this page at the time of your order applies to that order.
-Governing law
-These terms are governed by the laws of India. Any dispute is subject to the courts of Thrissur, Kerala.
-Contact / Grievance Officer
-Name: Jibin Panakkal
-Email: info@bhramananthu.com
-Phone: +91 99476 03194
-Address: Panakkal Ayurveda Pharmacy, Vilanganur, Peechi P.O, Thrissur – 680653, Kerala, India
+Here's the full message for the developer, with nothing to fill in:
+
+Meta Pixel – please add these 3 things
+1. Paste this inside <head> of index.html (once, for all pages):
+<!-- Meta Pixel Code -->  
+<script>  
+!function(f,b,e,v,n,t,s)  
+{if(f.fbq)return;n=f.fbq=function(){n.callMethod?  
+n.callMethod.apply(n,arguments):n.queue.push(arguments)};  
+if(!f._fbq)f._fbq=n;n.push=n;n.loaded=!0;n.version='2.0';  
+n.queue=[];t=b.createElement(e);t.async=!0;  
+t.src=v;s=b.getElementsByTagName(e)[0];  
+s.parentNode.insertBefore(t,s)}(window, document,'script',  
+'https://connect.facebook.net/en_US/fbevents.js');  
+fbq('init', '1766533370600791');  
+fbq('track', 'PageView');  
+</script>  
+<!-- End Meta Pixel Code -->  
+
+2. Add to cart: add this line where an item is added to the cart successfully (main Add to cart button and the mobile bottom-bar button):
+window.fbq && fbq('track', 'AddToCart');  
+
+3. Purchase: add this line where an order is placed successfully (online payment and cash on delivery), just before going to /myorders:
+window.fbq && fbq('track', 'Purchase', { value: 0, currency: 'INR' });  
+
+⚠️ Please do not put it on the /myorders page itself, or it will count again every time a customer opens My Orders.
+Use the code exactly as written, with no changes needed. 
+
+
+Here's where each one goes, in simple terms:
+#
+Code
+Where in the website
+When it runs
+1
+Main pixel code (the long block)
+The index.html file, inside the <head> section near the top. Every website has this file.
+On every page, automatically
+2
+AddToCart line
+In the code behind the "Add to cart" button, both the big button on the page and the one in the mobile bottom bar
+Each time someone taps Add to cart
+3
+Purchase line
+In the code behind the "Place order" / "Confirm order" button on the checkout page, in the part that runs after the order is saved successfully
+Each time an order is placed
+
+
