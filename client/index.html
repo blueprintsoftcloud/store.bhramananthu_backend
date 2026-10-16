@@ -1,11 +1,14 @@
 <!doctype html>
-<html lang="en" data-text-size="large">
+<html lang="en" data-text-size="xlarge">
   <head>
     <meta charset="UTF-8" />
     <script>
       (function() {
         try {
-          var size = localStorage.getItem("bhramananthu_text_size") || "large";
+          var size = localStorage.getItem("bhramananthu_text_size_v2") || localStorage.getItem("bhramananthu_text_size") || "xlarge";
+          if (size === "large" && !localStorage.getItem("bhramananthu_text_size_v2")) {
+            size = "xlarge";
+          }
           document.documentElement.setAttribute("data-text-size", size);
           var cache = localStorage.getItem("crm_branding_cache");
           if (cache) {
@@ -53,16 +56,17 @@
       fbq('init', '1766533370600791');  
       fbq('track', 'PageView');  
     </script>  
-    <noscript>
-      <img height="1" width="1" style="display:none" src="https://www.facebook.com/tr?id=1766533370600791&ev=PageView&noscript=1" />
-    </noscript>
     <!-- End Meta Pixel Code -->  
 
     <title>Bhramananthu Store | Panakkal Ayurveda Pharmacy</title>
-    <script type="module" crossorigin src="/assets/index-D7EBDK01.js"></script>
-    <link rel="stylesheet" crossorigin href="/assets/index-BdvSF5wG.css">
+    <script type="module" crossorigin src="/assets/index-BIpP8RiY.js"></script>
+    <link rel="stylesheet" crossorigin href="/assets/index-DTxl6nOj.css">
   </head>
   <body>
+    <!-- Meta Pixel noscript fallback -->
+    <noscript>
+      <img height="1" width="1" style="display:none" src="https://www.facebook.com/tr?id=1766533370600791&ev=PageView&noscript=1" />
+    </noscript>
     <div id="root"></div>
   </body>
 </html>
