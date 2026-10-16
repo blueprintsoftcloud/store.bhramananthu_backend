@@ -257,6 +257,7 @@ export const placeOrder = async (req: Request, res: Response) => {
     // transaction below fails, the Razorpay order is simply never referenced by any
     // persisted Order (a harmless orphan on Razorpay's side, not a data-integrity issue).
     const order = await prisma.$transaction(async (tx: typeof prisma) => {
+      const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
         city: incomingAddress.city || address.city,
@@ -265,6 +266,7 @@ export const placeOrder = async (req: Request, res: Response) => {
         country: incomingAddress.country || address.country || "India",
         lat: typeof incomingAddress.lat === "number" ? incomingAddress.lat : (address.latitude ?? undefined),
         lng: typeof incomingAddress.lng === "number" ? incomingAddress.lng : (address.longitude ?? undefined),
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
         city: address.city,
@@ -273,6 +275,7 @@ export const placeOrder = async (req: Request, res: Response) => {
         country: address.country,
         lat: address.latitude ?? undefined,
         lng: address.longitude ?? undefined,
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       };
 
       const created = await tx.order.create({
@@ -596,6 +599,7 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
     // Order + coupon usage + stock deduction + cart clear + payment log all succeed or
     // fail together (see placeOrder above for why).
     const order = await prisma.$transaction(async (tx: typeof prisma) => {
+      const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
         city: incomingAddress.city || address.city,
@@ -604,6 +608,7 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
         country: incomingAddress.country || address.country || "India",
         lat: typeof incomingAddress.lat === "number" ? incomingAddress.lat : (address.latitude ?? undefined),
         lng: typeof incomingAddress.lng === "number" ? incomingAddress.lng : (address.longitude ?? undefined),
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
         city: address.city,
@@ -612,6 +617,7 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
         country: address.country,
         lat: address.latitude ?? undefined,
         lng: address.longitude ?? undefined,
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       };
 
       const created = await tx.order.create({
@@ -842,6 +848,7 @@ export const placeOrderQR = async (req: Request, res: Response) => {
     const finalAmount = Math.max(subtotal + shippingCharge - discountAmount, 0);
 
     const order = await prisma.$transaction(async (tx: typeof prisma) => {
+      const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
         city: incomingAddress.city || address.city,
@@ -850,6 +857,7 @@ export const placeOrderQR = async (req: Request, res: Response) => {
         country: incomingAddress.country || address.country || "India",
         lat: typeof incomingAddress.lat === "number" ? incomingAddress.lat : (address.latitude ?? undefined),
         lng: typeof incomingAddress.lng === "number" ? incomingAddress.lng : (address.longitude ?? undefined),
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
         city: address.city,
@@ -858,6 +866,7 @@ export const placeOrderQR = async (req: Request, res: Response) => {
         country: address.country,
         lat: address.latitude ?? undefined,
         lng: address.longitude ?? undefined,
+        ...(secondaryPhone ? { secondaryPhone } : {}),
       };
 
       const created = await tx.order.create({
@@ -2091,6 +2100,23 @@ export const getOrderById = async (req: Request, res: Response) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
+    if (!order.shippingAddress?.secondaryPhone && order.userId) {
+      try {
+        const userAddr = await Address.findOne({
+          userId: new mongoose.Types.ObjectId(order.userId),
+          secondaryPhone: { $exists: true, $nin: ["", null] },
+        }).lean();
+        if (userAddr?.secondaryPhone) {
+          order.shippingAddress = {
+            ...(order.shippingAddress || {}),
+            secondaryPhone: userAddr.secondaryPhone,
+          };
+        }
+      } catch (e) {
+        logger.warn("getOrderById: secondaryPhone lookup failed", e);
+      }
+    }
+
     res.status(200).json({ order });
   } catch (err: any) {
     logger.error("getOrderById error", err);
@@ -2130,6 +2156,47 @@ export const getBulkInvoices = async (req: Request, res: Response) => {
       orderBy: { createdAt: "asc" }, // chronological order for batch packing/fulfillment
       take: maxLimit,
     });
+
+    // For orders missing secondaryPhone in shippingAddress, enrich from customer's saved address if available
+    const userIdsMissingSecondary = orders
+      .filter((o: any) => !o.shippingAddress?.secondaryPhone && o.userId)
+      .map((o: any) => o.userId);
+
+    if (userIdsMissingSecondary.length > 0) {
+      try {
+        const objectIds = userIdsMissingSecondary
+          .map((id: any) => {
+            try {
+              return new mongoose.Types.ObjectId(id);
+            } catch {
+              return null;
+            }
+          })
+          .filter(Boolean);
+
+        const savedAddresses = await Address.find({
+          userId: { $in: objectIds },
+          secondaryPhone: { $exists: true, $nin: ["", null] },
+        }).lean();
+        const addrMap = new Map<string, string>();
+        for (const a of savedAddresses) {
+          if (a.secondaryPhone && !addrMap.has(a.userId.toString())) {
+            addrMap.set(a.userId.toString(), a.secondaryPhone);
+          }
+        }
+        for (const o of orders as any[]) {
+          const uId = o.userId?.toString();
+          if (!o.shippingAddress?.secondaryPhone && uId && addrMap.has(uId)) {
+            o.shippingAddress = {
+              ...(o.shippingAddress || {}),
+              secondaryPhone: addrMap.get(uId),
+            };
+          }
+        }
+      } catch (e) {
+        logger.warn("getBulkInvoices: secondaryPhone enrichment failed", e);
+      }
+    }
 
     res.status(200).json({ orders });
   } catch (err: any) {
