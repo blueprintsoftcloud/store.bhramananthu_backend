@@ -24,6 +24,7 @@ import {
   bulkUpdateStatus,
   lookupPincode,
   getShippingToggles,
+  updateOrderShippingAddress,
 } from "../controllers/order.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
 import { uploadScreenshot } from "../middleware/upload";
@@ -60,6 +61,7 @@ router.post("/mark-invoices-printed", authMiddleware, adminOrStaff(["ORDER_VIEW"
 router.put("/bulk-update-status", authMiddleware, adminOrStaff("ORDER_UPDATE"), bulkUpdateStatus);
 router.get("/customer-transactions", authMiddleware, adminOrStaff("ORDER_VIEW"), getCustomerTransactions);
 router.put("/update/:id", authMiddleware, adminOrStaff("ORDER_UPDATE"), validate(updateOrderStatusSchema), updateStatus);
+router.put("/:id/shipping-address", authMiddleware, adminOrStaff("ORDER_UPDATE"), updateOrderShippingAddress);
 router.patch("/:id/refund", authMiddleware, adminOrStaff("ORDER_UPDATE"), refundOrder);
 
 // Admin / Staff Order (place on behalf of customer)

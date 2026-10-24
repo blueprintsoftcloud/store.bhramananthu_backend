@@ -1158,9 +1158,10 @@ export const getOrders = async (req: Request, res: Response) => {
 // GET /api/orders/admin?page=1&limit=20&status=&source=&placedBy=&search=  (admin/staff)
 export const getOrdersForAdmin = async (req: Request, res: Response) => {
   try {
-    const { page = "1", limit = "20", status, source, placedBy, search, invoicePrinted, startDate, endDate } = req.query as Record<string, string | undefined>;
+    const { page = "1", limit = "20", status, source, placedBy, search, invoicePrinted, startDate, endDate, isExport } = req.query as Record<string, string | undefined>;
 
-    const pageSize = Math.min(Math.max(parseInt(limit ?? "20") || 20, 1), 100);
+    const maxLimit = isExport === "true" ? 5000 : 100;
+    const pageSize = Math.min(Math.max(parseInt(limit ?? "20") || 20, 1), maxLimit);
     const skip = (Math.max(parseInt(page ?? "1") || 1, 1) - 1) * pageSize;
     const where: any = {};
 
@@ -1683,6 +1684,86 @@ export const updateStatus = async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error("updateStatus error", err);
     res.status(500).json({ message: "Error in Updating order status" });
+  }
+};
+
+// PUT /api/order/:id/shipping-address (admin or staff with ORDER_UPDATE permission)
+export const updateOrderShippingAddress = async (req: Request, res: Response) => {
+  try {
+    const id = req.params.id as string;
+    const {
+      fullName,
+      name,
+      phone,
+      secondaryPhone,
+      zipCode,
+      locality,
+      city,
+      state,
+      country = "India",
+      fullAddress,
+    } = req.body as {
+      fullName?: string;
+      name?: string;
+      phone?: string;
+      secondaryPhone?: string;
+      zipCode?: string;
+      locality?: string;
+      city?: string;
+      state?: string;
+      country?: string;
+      fullAddress?: string;
+    };
+
+    const order = await prisma.order.findUnique({
+      where: { id },
+    });
+    if (!order) return res.status(404).json({ message: "Order not found" });
+
+    const existingShippingAddress = (order.shippingAddress as Record<string, any>) || {};
+
+    const resolvedName = (fullName ?? name ?? existingShippingAddress.fullName ?? existingShippingAddress.name ?? "").trim();
+    const updatedShippingAddress = {
+      ...existingShippingAddress,
+      fullName: resolvedName,
+      name: resolvedName,
+      phone: (phone ?? existingShippingAddress.phone ?? "").toString().trim(),
+      secondaryPhone: (secondaryPhone ?? existingShippingAddress.secondaryPhone ?? "").toString().trim(),
+      zipCode: (zipCode ?? existingShippingAddress.zipCode ?? "").toString().trim(),
+      locality: (locality ?? existingShippingAddress.locality ?? "").trim(),
+      city: (city ?? existingShippingAddress.city ?? "").trim(),
+      state: (state ?? existingShippingAddress.state ?? "").trim(),
+      country: (country ?? existingShippingAddress.country ?? "India").trim(),
+      fullAddress: (fullAddress ?? existingShippingAddress.fullAddress ?? "").trim(),
+    };
+
+    const updatedOrder = await prisma.order.update({
+      where: { id },
+      data: {
+        shippingAddress: updatedShippingAddress,
+      },
+    });
+
+    await createAuditLog({
+      req,
+      action: "UPDATE_ORDER_SHIPPING_ADDRESS",
+      entity: "Order",
+      entityId: id,
+      details: {
+        zipCode: updatedShippingAddress.zipCode,
+        locality: updatedShippingAddress.locality,
+        city: updatedShippingAddress.city,
+        state: updatedShippingAddress.state,
+      },
+    });
+
+    res.status(200).json({
+      message: "Shipping address updated successfully",
+      order: updatedOrder,
+    });
+  } catch (err: any) {
+    logger.error("updateOrderShippingAddress error", err);
+    res.status(500).json({ message: "Failed to update shipping address" });
   }
 };
 
