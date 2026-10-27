@@ -260,6 +260,7 @@ export const placeOrder = async (req: Request, res: Response) => {
       const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
+        locality: (incomingAddress.locality || (address as any).locality || "").toString().trim(),
         city: incomingAddress.city || address.city,
         state: incomingAddress.state || address.state,
         zipCode: incomingAddress.zipCode || address.zipCode,
@@ -269,6 +270,7 @@ export const placeOrder = async (req: Request, res: Response) => {
         ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
+        locality: ((address as any).locality || "").toString().trim(),
         city: address.city,
         state: address.state,
         zipCode: address.zipCode,
@@ -602,6 +604,7 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
       const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
+        locality: (incomingAddress.locality || (address as any).locality || "").toString().trim(),
         city: incomingAddress.city || address.city,
         state: incomingAddress.state || address.state,
         zipCode: incomingAddress.zipCode || address.zipCode,
@@ -611,6 +614,7 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
         ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
+        locality: ((address as any).locality || "").toString().trim(),
         city: address.city,
         state: address.state,
         zipCode: address.zipCode,
@@ -851,6 +855,7 @@ export const placeOrderQR = async (req: Request, res: Response) => {
       const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
       const finalShippingAddress = incomingAddress?.fullAddress ? {
         fullAddress: incomingAddress.fullAddress,
+        locality: (incomingAddress.locality || (address as any).locality || "").toString().trim(),
         city: incomingAddress.city || address.city,
         state: incomingAddress.state || address.state,
         zipCode: incomingAddress.zipCode || address.zipCode,
@@ -860,6 +865,7 @@ export const placeOrderQR = async (req: Request, res: Response) => {
         ...(secondaryPhone ? { secondaryPhone } : {}),
       } : {
         fullAddress: address.fullAddress,
+        locality: ((address as any).locality || "").toString().trim(),
         city: address.city,
         state: address.state,
         zipCode: address.zipCode,
@@ -2181,20 +2187,24 @@ export const getOrderById = async (req: Request, res: Response) => {
       return res.status(403).json({ message: "Not authorised" });
     }
 
-    if (!order.shippingAddress?.secondaryPhone && order.userId) {
+    if ((!order.shippingAddress?.secondaryPhone || !order.shippingAddress?.locality) && order.userId) {
       try {
         const userAddr = await Address.findOne({
           userId: new mongoose.Types.ObjectId(order.userId),
-          secondaryPhone: { $exists: true, $nin: ["", null] },
+          $or: [
+            { secondaryPhone: { $exists: true, $nin: ["", null] } },
+            { locality: { $exists: true, $nin: ["", null] } },
+          ],
         }).lean();
-        if (userAddr?.secondaryPhone) {
+        if (userAddr) {
           order.shippingAddress = {
             ...(order.shippingAddress || {}),
-            secondaryPhone: userAddr.secondaryPhone,
+            secondaryPhone: order.shippingAddress?.secondaryPhone || userAddr.secondaryPhone,
+            locality: order.shippingAddress?.locality || userAddr.locality,
           };
         }
       } catch (e) {
-        logger.warn("getOrderById: secondaryPhone lookup failed", e);
+        logger.warn("getOrderById: secondaryPhone/locality lookup failed", e);
       }
     }
 
@@ -2238,14 +2248,14 @@ export const getBulkInvoices = async (req: Request, res: Response) => {
       take: maxLimit,
     });
 
-    // For orders missing secondaryPhone in shippingAddress, enrich from customer's saved address if available
-    const userIdsMissingSecondary = orders
-      .filter((o: any) => !o.shippingAddress?.secondaryPhone && o.userId)
+    // For orders missing secondaryPhone or locality in shippingAddress, enrich from customer's saved address if available
+    const userIdsMissingEnrichment = orders
+      .filter((o: any) => (!o.shippingAddress?.secondaryPhone || !o.shippingAddress?.locality) && o.userId)
       .map((o: any) => o.userId);
 
-    if (userIdsMissingSecondary.length > 0) {
+    if (userIdsMissingEnrichment.length > 0) {
       try {
-        const objectIds = userIdsMissingSecondary
+        const objectIds = userIdsMissingEnrichment
           .map((id: any) => {
             try {
               return new mongoose.Types.ObjectId(id);
@@ -2257,25 +2267,34 @@ export const getBulkInvoices = async (req: Request, res: Response) => {
 
         const savedAddresses = await Address.find({
           userId: { $in: objectIds },
-          secondaryPhone: { $exists: true, $nin: ["", null] },
+          $or: [
+            { secondaryPhone: { $exists: true, $nin: ["", null] } },
+            { locality: { $exists: true, $nin: ["", null] } },
+          ],
         }).lean();
-        const addrMap = new Map<string, string>();
+        const phoneMap = new Map<string, string>();
+        const locMap = new Map<string, string>();
         for (const a of savedAddresses) {
-          if (a.secondaryPhone && !addrMap.has(a.userId.toString())) {
-            addrMap.set(a.userId.toString(), a.secondaryPhone);
+          const uStr = a.userId.toString();
+          if (a.secondaryPhone && !phoneMap.has(uStr)) {
+            phoneMap.set(uStr, a.secondaryPhone);
+          }
+          if (a.locality && !locMap.has(uStr)) {
+            locMap.set(uStr, a.locality);
           }
         }
         for (const o of orders as any[]) {
           const uId = o.userId?.toString();
-          if (!o.shippingAddress?.secondaryPhone && uId && addrMap.has(uId)) {
+          if (uId && (!o.shippingAddress?.secondaryPhone || !o.shippingAddress?.locality)) {
             o.shippingAddress = {
               ...(o.shippingAddress || {}),
-              secondaryPhone: addrMap.get(uId),
+              secondaryPhone: o.shippingAddress?.secondaryPhone || phoneMap.get(uId),
+              locality: o.shippingAddress?.locality || locMap.get(uId),
             };
           }
         }
       } catch (e) {
-        logger.warn("getBulkInvoices: secondaryPhone enrichment failed", e);
+        logger.warn("getBulkInvoices: secondaryPhone/locality enrichment failed", e);
       }
     }
 
@@ -2332,6 +2351,7 @@ const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId
       const sa = lastOrder.shippingAddress;
       return {
         fullAddress: sa.fullAddress || sa.address || sa.street || "",
+        locality: sa.locality || "",
         city: sa.city || "",
         state: sa.state || "",
         zipCode: sa.zipCode || sa.pincode || sa.pinCode || "",
@@ -2347,6 +2367,7 @@ const getCustomerRecentAddress = async (userId: string | mongoose.Types.ObjectId
     if (savedAddr && savedAddr.fullAddress) {
       return {
         fullAddress: savedAddr.fullAddress || "",
+        locality: (savedAddr as any).locality || "",
         city: savedAddr.city || "",
         state: savedAddr.state || "",
         zipCode: savedAddr.zipCode || "",
@@ -2638,7 +2659,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
       customerId?: string;
       newCustomer?: { username: string; phone: string; email?: string };
       items: Array<{ productId: string; variantId?: string | null; quantity: number }>;
-      address?: { fullAddress?: string; city?: string; state?: string; zipCode?: string; country?: string; secondaryPhone?: string };
+      address?: { fullAddress?: string; locality?: string; city?: string; state?: string; zipCode?: string; country?: string; secondaryPhone?: string };
       paymentMethod: "CASH" | "POD";
       paymentNote?: string;
       couponId?: string;
@@ -2882,6 +2903,7 @@ export const placeAdminOrder = async (req: Request, res: Response) => {
           couponId: resolvedCouponId,
           shippingAddress: {
             fullAddress: address?.fullAddress?.trim() || "",
+            locality: address?.locality?.trim() || "",
             city: address?.city?.trim() || "",
             state: address?.state?.trim() || "",
             zipCode: address?.zipCode?.trim() || "",
@@ -3016,7 +3038,17 @@ export const lookupPincode = async (req: Request, res: Response) => {
           const fetchedDistrict = (po.District && po.District !== "NA") ? po.District : "";
           const fetchedCity = fetchedDistrict || po.Block || po.Name || "";
           const fetchedState = po.State || "";
-          return res.json({ success: true, city: fetchedCity, district: fetchedDistrict, state: fetchedState });
+          const rawNames: string[] = postOffices
+            .map((p: any) => String(p?.Name || "").trim())
+            .filter(Boolean);
+          const uniqueLocalities: string[] = Array.from(new Set<string>(rawNames)).sort((a, b) => a.localeCompare(b));
+          return res.json({
+            success: true,
+            city: fetchedCity,
+            district: fetchedDistrict,
+            state: fetchedState,
+            localities: uniqueLocalities,
+          });
         }
       }
     }

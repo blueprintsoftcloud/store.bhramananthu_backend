@@ -119,7 +119,7 @@ export const saveLocationAndGetShipping = async (req: Request, res: Response) =>
 // POST /api/address/save-manual  (authenticated)
 export const saveManualAddress = async (req: Request, res: Response) => {
   try {
-    const { fullAddress, city, state, zipCode, country = "India", latitude, longitude } = req.body;
+    const { fullAddress, city, state, zipCode, country = "India", latitude, longitude, locality, secondaryPhone } = req.body;
     const userId = req.user!.id;
 
     if (!fullAddress || !city || !zipCode) {
@@ -142,10 +142,12 @@ export const saveManualAddress = async (req: Request, res: Response) => {
     const addressData = {
       userId,
       fullAddress,
+      locality: locality ? String(locality).trim() : existingDefault?.locality,
       city,
       state: state ?? "",
       country,
       zipCode,
+      secondaryPhone: secondaryPhone ? String(secondaryPhone).trim() : existingDefault?.secondaryPhone,
       latitude: lat,
       longitude: lng,
       isDefault: true,

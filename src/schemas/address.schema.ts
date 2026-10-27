@@ -24,6 +24,8 @@ export const addressSchema = z.object({
     .trim(),
   country: z.string().max(100).trim().default("India"),
   landmark: z.string().max(200).trim().optional(),
+  locality: z.string().max(150).trim().optional(),
+  secondaryPhone: z.string().max(20).trim().optional(),
   isDefault: z.boolean().optional().default(false),
   latitude: z.number().min(-90).max(90).optional(),
   longitude: z.number().min(-180).max(180).optional(),

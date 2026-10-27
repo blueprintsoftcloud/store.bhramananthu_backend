@@ -81,6 +81,7 @@ export interface IAddress extends Document {
   zipCode: string;
   country: string;
   landmark?: string;
+  locality?: string;
   secondaryPhone?: string;
   isDefault: boolean;
   latitude?: number;
@@ -98,6 +99,7 @@ const AddressSchema = new Schema<IAddress>(
     zipCode: { type: String, required: true },
     country: { type: String, default: 'India' },
     landmark: String,
+    locality: String,
     secondaryPhone: String,
     isDefault: { type: Boolean, default: false },
     latitude: Number,
