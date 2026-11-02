@@ -42,6 +42,7 @@ const envSchema = z.object({
   // Razorpay — storefront e-commerce checkout
   RAZORPAY_KEY_ID: z.string().min(1, "RAZORPAY_KEY_ID is required"),
   RAZORPAY_KEY_SECRET: z.string().min(1, "RAZORPAY_KEY_SECRET is required"),
+  RAZORPAY_WEBHOOK_SECRET: z.string().default(""),
 
   // MSG91 Mobile OTP (SMS widget) — MSG91_AUTH_KEY is the account-wide key, also
   // used to authenticate the Email API calls below.

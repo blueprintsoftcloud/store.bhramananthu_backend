@@ -243,6 +243,37 @@ export const placeOrder = async (req: Request, res: Response) => {
 
     const finalAmount = Math.max(subtotal + shippingCharge - discountAmount, 0);
 
+    // Concurrency / duplicate submission guard:
+    // If the customer rapidly double-tapped "Pay Now" on mobile or their client retried,
+    // return the existing PENDING online order created within the last 30 seconds rather than
+    // creating a duplicate Razorpay order, duplicate DB record, and double-deducting stock.
+    const recentDuplicate = await prisma.order.findFirst({
+      where: {
+        userId,
+        paymentMethod: "ONLINE",
+        paymentStatus: "PENDING",
+        orderStatus: "PROCESSING",
+        finalAmount,
+        createdAt: {
+          gte: new Date(Date.now() - 30 * 1000),
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (recentDuplicate && recentDuplicate.razorpayOrderId) {
+      logger.info(`Deduplicated placeOrder call for user ${userId}; returning existing order #${recentDuplicate.id}`);
+      return res.status(200).json({
+        order: recentDuplicate,
+        rzpOrder: {
+          id: recentDuplicate.razorpayOrderId,
+          amount: Math.round(recentDuplicate.finalAmount * 100),
+          currency: "INR",
+        },
+        razorpay_key_id: env.RAZORPAY_KEY_ID,
+      });
+    }
+
     // Create Razorpay order
     const rzpOrder = await razorpay.orders.create({
       amount: Math.round(finalAmount * 100), // paise
@@ -501,6 +532,214 @@ export const verifyPayment = async (req: Request, res: Response) => {
   }
 };
 
+// POST /api/order/razorpay-webhook (unauthenticated, signature-verified server-to-server)
+export const handleRazorpayWebhook = async (req: Request, res: Response) => {
+  try {
+    const signature = req.headers["x-razorpay-signature"] as string;
+    if (!signature) {
+      logger.warn("[Razorpay Webhook] Missing x-razorpay-signature header");
+      return res.status(400).json({ message: "Missing webhook signature" });
+    }
+
+    const webhookSecret = env.RAZORPAY_WEBHOOK_SECRET || env.RAZORPAY_KEY_SECRET;
+    const rawPayload = (req as any).rawBody || JSON.stringify(req.body);
+
+    const expectedSignature = crypto
+      .createHmac("sha256", webhookSecret)
+      .update(rawPayload)
+      .digest("hex");
+
+    const isMatch =
+      typeof signature === "string" &&
+      signature.length === expectedSignature.length &&
+      crypto.timingSafeEqual(Buffer.from(signature, "utf-8"), Buffer.from(expectedSignature, "utf-8"));
+
+    if (!isMatch) {
+      logger.warn("[Razorpay Webhook] Signature verification failed");
+      return res.status(400).json({ message: "Invalid webhook signature" });
+    }
+
+    const event = req.body?.event;
+    logger.info(`[Razorpay Webhook] Received valid event: ${event}`);
+
+    // 1. Payment Success: payment.captured or order.paid
+    if (event === "payment.captured" || event === "order.paid") {
+      const paymentEntity = req.body?.payload?.payment?.entity;
+      const orderEntity = req.body?.payload?.order?.entity;
+      const rzpOrderId = paymentEntity?.order_id || orderEntity?.id;
+      const rzpPaymentId = paymentEntity?.id;
+
+      if (!rzpOrderId) {
+        return res.status(200).json({ message: "Acknowledged: no order_id in payload" });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { razorpayOrderId: rzpOrderId },
+        include: { items: true },
+      });
+
+      if (!order) {
+        logger.warn(`[Razorpay Webhook] No matching order found for razorpayOrderId: ${rzpOrderId}`);
+        return res.status(200).json({ message: "Order not found" });
+      }
+
+      // Idempotency guard: If already marked PAID, return success without duplicate side-effects
+      if (order.paymentStatus === "PAID") {
+        return res.status(200).json({ message: "Order already confirmed and paid", orderId: order.id });
+      }
+
+      const shortId = order.id.slice(-6);
+
+      const updated = await prisma.$transaction(async (tx: typeof prisma) => {
+        const updatedOrder = await tx.order.update({
+          where: { id: order.id, paymentStatus: { not: "PAID" } },
+          data: {
+            paymentStatus: "PAID",
+            orderStatus: "CONFIRMED",
+            razorpayPaymentId: rzpPaymentId || order.razorpayPaymentId,
+            razorpaySignature: signature,
+          },
+        });
+        if (!updatedOrder) return null; // Lost race to concurrent frontend verification call
+
+        await tx.paymentLog.create({
+          data: {
+            orderId: order.id,
+            userId: order.userId,
+            event: "PAYMENT_SUCCESS",
+            razorpayOrderId: rzpOrderId,
+            razorpayPaymentId: rzpPaymentId,
+            razorpaySignature: signature,
+            paymentMethod: "ONLINE",
+            paymentStatus: "PAID",
+            amount: order.finalAmount,
+            signatureValid: true,
+            gatewayResponse: {
+              source: "webhook",
+              event,
+              razorpayOrderId: rzpOrderId,
+              razorpayPaymentId: rzpPaymentId,
+            },
+            ipAddress: req.ip ?? null,
+          },
+        });
+
+        // Clear user's cart
+        await tx.cart.deleteMany({ where: { userId: order.userId } });
+
+        return updatedOrder;
+      });
+
+      if (updated) {
+        void (async () => {
+          try {
+            const user = await prisma.user.findUnique({
+              where: { id: order.userId },
+              select: { username: true, email: true },
+            });
+            const adminIds = await getAdminRecipients();
+            const orderRecipients = await getAdminAndStaffRecipients("ORDER_VIEW");
+            await notifyUsers(req, order.id, `New Order from ${user?.username || "Customer"}: ₹${order.finalAmount}`, "NEW_ORDER", order.userId, orderRecipients);
+            await notifyUsers(req, order.id, `Payment Confirmed: Order #${shortId} by ${user?.username || "Customer"}`, "PAYMENT_SUCCESS", order.userId, adminIds);
+            await notifyUsers(req, order.id, `Success! Payment confirmed for order #${shortId}`, "PAYMENT_SUCCESS", order.userId, [order.userId]);
+
+            if (user?.email) {
+              try {
+                await sendEmail({
+                  to: user.email,
+                  toName: user.username,
+                  ...orderConfirmationEmailPayload(shortId, user.username, updated.finalAmount.toFixed(2), "ONLINE"),
+                });
+                logger.info(`[Razorpay Webhook] Order confirmation email sent to ${user.email}`);
+              } catch (emailErr) {
+                logger.error("[Razorpay Webhook] Order confirmation email failed", emailErr);
+              }
+            }
+          } catch (bgErr) {
+            logger.error("[Razorpay Webhook] Post-processing notification/email error", bgErr);
+          }
+        })();
+      }
+
+      return res.status(200).json({ message: "Payment verified and order confirmed", orderId: order.id });
+    }
+
+    // 2. Payment Failure: payment.failed
+    if (event === "payment.failed") {
+      const paymentEntity = req.body?.payload?.payment?.entity;
+      const rzpOrderId = paymentEntity?.order_id;
+      const rzpPaymentId = paymentEntity?.id;
+
+      if (!rzpOrderId) {
+        return res.status(200).json({ message: "Acknowledged: no order_id in payload" });
+      }
+
+      const order = await prisma.order.findFirst({
+        where: { razorpayOrderId: rzpOrderId },
+        include: { items: true },
+      });
+
+      if (!order) {
+        return res.status(200).json({ message: "Order not found" });
+      }
+
+      // If the order is still waiting in PROCESSING, cancel it and release inventory back
+      if (order.orderStatus === "PROCESSING") {
+        const cancelled = await prisma.order.update({
+          where: { id: order.id, orderStatus: "PROCESSING" },
+          data: {
+            orderStatus: "CANCELLED",
+            paymentStatus: "FAILED",
+          },
+        });
+
+        if (cancelled) {
+          await restoreStock({
+            orderId: order.id,
+            items: order.items.map((item: any) => ({
+              productId: item.productId,
+              variantId: item.variantId ?? null,
+              quantity: item.quantity,
+            })),
+          });
+
+          await prisma.paymentLog.create({
+            data: {
+              orderId: order.id,
+              userId: order.userId,
+              event: "PAYMENT_FAILED",
+              razorpayOrderId: rzpOrderId,
+              razorpayPaymentId: rzpPaymentId,
+              razorpaySignature: signature,
+              paymentMethod: "ONLINE",
+              paymentStatus: "FAILED",
+              amount: order.finalAmount,
+              signatureValid: true,
+              gatewayResponse: {
+                source: "webhook",
+                event,
+                error_code: paymentEntity?.error_code,
+                error_description: paymentEntity?.error_description,
+              },
+              ipAddress: req.ip ?? null,
+            },
+          });
+
+          logger.info(`[Razorpay Webhook] Order #${order.id} marked CANCELLED and stock restored`);
+        }
+      }
+
+      return res.status(200).json({ message: "Payment failure recorded" });
+    }
+
+    // Acknowledge any other events safely with 200
+    return res.status(200).json({ message: `Event ${event} acknowledged` });
+  } catch (err: any) {
+    logger.error("[Razorpay Webhook] Error processing event", err);
+    return res.status(500).json({ message: "Webhook processing error", error: err.message });
+  }
+};
+
 // POST /api/orders/place-pod  (authenticated) — Pay on Delivery
 export const placeOrderPOD = async (req: Request, res: Response) => {
   try {
@@ -597,6 +836,25 @@ export const placeOrderPOD = async (req: Request, res: Response) => {
     }
 
     const finalAmount = Math.max(subtotal + shippingCharge - discountAmount, 0);
+
+    // Concurrency / duplicate submission guard:
+    const recentDuplicatePOD = await prisma.order.findFirst({
+      where: {
+        userId,
+        paymentMethod: "POD",
+        orderStatus: "CONFIRMED",
+        finalAmount,
+        createdAt: {
+          gte: new Date(Date.now() - 30 * 1000),
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (recentDuplicatePOD) {
+      logger.info(`Deduplicated placeOrderPOD call for user ${userId}; returning existing order #${recentDuplicatePOD.id}`);
+      return res.status(200).json({ message: "Order placed successfully via POD", order: recentDuplicatePOD });
+    }
 
     // Order + coupon usage + stock deduction + cart clear + payment log all succeed or
     // fail together (see placeOrder above for why).
@@ -850,6 +1108,25 @@ export const placeOrderQR = async (req: Request, res: Response) => {
     }
 
     const finalAmount = Math.max(subtotal + shippingCharge - discountAmount, 0);
+
+    // Concurrency / duplicate submission guard:
+    const recentDuplicateQR = await prisma.order.findFirst({
+      where: {
+        userId,
+        paymentMethod: "QR",
+        orderStatus: "CONFIRMED",
+        finalAmount,
+        createdAt: {
+          gte: new Date(Date.now() - 30 * 1000),
+        },
+      },
+      orderBy: { createdAt: "desc" },
+    });
+
+    if (recentDuplicateQR) {
+      logger.info(`Deduplicated placeOrderQR call for user ${userId}; returning existing order #${recentDuplicateQR.id}`);
+      return res.status(200).json({ message: "Order placed successfully via QR", order: recentDuplicateQR });
+    }
 
     const order = await prisma.$transaction(async (tx: typeof prisma) => {
       const secondaryPhone = (incomingAddress?.secondaryPhone || incomingAddress?.alternatePhone || address.secondaryPhone || "")?.toString().trim();
@@ -1502,6 +1779,18 @@ export const updateStatus = async (req: Request, res: Response) => {
     }
     if (orderStatus === "DELIVERED" && order.orderStatus !== "SHIPPED") {
       return res.status(400).json({ message: "An order must be marked SHIPPED before it can be marked DELIVERED." });
+    }
+
+    // Guard against fulfilling or shipping unpaid online/QR orders
+    const isOnlinePayment = order.paymentMethod === "ONLINE" || order.paymentMethod === "QR";
+    if (
+      isOnlinePayment &&
+      order.paymentStatus !== "PAID" &&
+      (orderStatus === "CONFIRMED" || orderStatus === "SHIPPED" || orderStatus === "DELIVERED")
+    ) {
+      return res.status(400).json({
+        message: `Cannot update order #${id.slice(-6)} to ${orderStatus}: Payment has not been received (Payment Status is ${order.paymentStatus || "PENDING"}). Online orders must be paid before fulfilling or shipping.`,
+      });
     }
 
     // Resolving the courier before the order update means a bad delivery-partner

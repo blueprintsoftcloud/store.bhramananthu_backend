@@ -25,6 +25,7 @@ import {
   lookupPincode,
   getShippingToggles,
   updateOrderShippingAddress,
+  handleRazorpayWebhook,
 } from "../controllers/order.controller";
 import { authMiddleware } from "../middleware/auth.middleware";
 import { uploadScreenshot } from "../middleware/upload";
@@ -33,6 +34,9 @@ import { validate } from "../middleware/validate.middleware";
 import { verifyPaymentSchema, updateOrderStatusSchema } from "../schemas/order.schema";
 
 const router = Router();
+
+// Razorpay Server-to-Server Webhook — unauthenticated (signature verified)
+router.post("/razorpay-webhook", handleRazorpayWebhook);
 
 // Customer routes — never gated
 router.post("/place", authMiddleware, placeOrder);
