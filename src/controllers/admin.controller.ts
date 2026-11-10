@@ -1,6 +1,7 @@
 import { Request, Response } from "express";
+import mongoose from "mongoose";
 import bcrypt from "bcryptjs";
-import { User, Product, Order, OrderItem, StaffProfile } from "../models/mongoose";
+import { User, Product, ProductVariant, Order, OrderItem, StaffProfile } from "../models/mongoose";
 import logger from "../utils/logger";
 import { createAuditLog } from "../utils/auditLog";
 
@@ -347,6 +348,16 @@ export const getDashboardData = async (req: Request, res: Response) => {
       return Math.round(((curr - prev) / prev) * 100);
     };
 
+    let returningData: { orders: any[]; stats: any } = {
+      orders: [],
+      stats: { totalOrders: 0, totalRevenue: 0, uniqueCustomersCount: 0, averageOrderValue: 0, monthLabel: "This Month" },
+    };
+    try {
+      returningData = await fetchReturningCustomerOrdersData({ limit: 5 });
+    } catch (retErr) {
+      logger.warn("getDashboardData: returningCustomerOrders failed, falling back to empty", retErr);
+    }
+
     res.json({
       summary: {
         revenue: {
@@ -382,6 +393,8 @@ export const getDashboardData = async (req: Request, res: Response) => {
       topProducts,
       lowStockProducts,
       recentOrders,
+      returningCustomerOrders: returningData.orders,
+      returningCustomerStats: returningData.stats,
       paymentMethods: [
         { method: "ONLINE", count: onlineAgg[0]?.count ?? 0, revenue: onlineAgg[0]?.total ?? 0 },
         { method: "COD", count: codAgg[0]?.count ?? 0, revenue: codAgg[0]?.total ?? 0 },
@@ -590,5 +603,414 @@ export const deleteUser = async (req: Request, res: Response) => {
   } catch (err: any) {
     logger.error("deleteUser error", err);
     return res.status(500).json({ message: "Error deleting user." });
+  }
+};
+
+// ── Returning / Previous Customer Orders Query Helper ───────────────────────────
+export interface ReturningCustomerOrdersQueryOptions {
+  page?: number;
+  limit?: number;
+  search?: string;
+  status?: string;
+  paymentMethod?: string;
+  sortBy?: "newest" | "oldest" | "amount_desc" | "amount_asc" | "prior_desc";
+  month?: number;
+  year?: number;
+  from?: string;
+  to?: string;
+}
+
+export const fetchReturningCustomerOrdersData = async (options: ReturningCustomerOrdersQueryOptions = {}) => {
+  const now = new Date();
+  let windowStart: Date;
+  let windowEnd: Date;
+
+  if (options.from || options.to) {
+    windowStart = options.from ? new Date(options.from) : new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    windowEnd = options.to ? new Date(options.to) : new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  } else if (options.year && options.month) {
+    windowStart = new Date(options.year, options.month - 1, 1, 0, 0, 0, 0);
+    windowEnd = new Date(options.year, options.month, 0, 23, 59, 59, 999);
+  } else {
+    // Current calendar month (1st of month to end of month)
+    windowStart = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
+    windowEnd = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
+  }
+
+  const monthLabel = windowStart.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+
+  // 1. Genuine returning customers:
+  // Must have ordered strictly prior to windowStart
+  const priorCustomerIds = await Order.distinct("userId", {
+    userId: { $ne: null },
+    createdAt: { $lt: windowStart },
+  });
+
+  // AND must have placed order(s) within the current month window
+  const returningUserIds = await Order.distinct("userId", {
+    userId: { $in: priorCustomerIds },
+    createdAt: { $gte: windowStart, $lte: windowEnd },
+  });
+
+  if (returningUserIds.length === 0) {
+    return {
+      customers: [],
+      orders: [],
+      stats: {
+        totalReturningCustomers: 0,
+        totalThisMonthQty: 0,
+        totalThisMonthRevenue: 0,
+        totalPriorQty: 0,
+        totalLifetimeQty: 0,
+        monthLabel,
+        windowStart: windowStart.toISOString(),
+        windowEnd: windowEnd.toISOString(),
+        totalOrders: 0,
+        totalRevenue: 0,
+        uniqueCustomersCount: 0,
+        averageOrderValue: 0,
+      },
+      pagination: {
+        page: 1,
+        limit: options.limit || 20,
+        total: 0,
+        totalPages: 1,
+      },
+    };
+  }
+
+  // Fetch all orders for all returning customers across all time
+  const allOrders = await Order.find({
+    userId: { $in: returningUserIds }
+  }).sort({ createdAt: -1 }).lean();
+
+  const allOrderIds = allOrders.map((o: any) => o._id);
+  const orderItems = await OrderItem.find({
+    orderId: { $in: allOrderIds }
+  })
+    .populate("productId", "name image code price basePrice")
+    .populate("variantId", "options priceOverride sku")
+    .lean();
+
+  // Index items by orderId with clear bottle and pack counts
+  const itemsByOrderId = new Map<string, any[]>();
+  for (const it of orderItems) {
+    const oid = String(it.orderId);
+    if (!itemsByOrderId.has(oid)) itemsByOrderId.set(oid, []);
+    const v = it.variantId as any;
+    const optStr = v?.options ? Object.values(v.options).join(", ") : "";
+    const qty = it.quantity || 1;
+    const matchBottles = (optStr || "").match(/(\d+)\s*Bottle/i);
+    const bottlesPerPack = matchBottles ? parseInt(matchBottles[1], 10) : 1;
+    const totalBottles = qty * bottlesPerPack;
+
+    let friendlyLabel = "";
+    if (bottlesPerPack === 1) {
+      friendlyLabel = qty === 1 ? "1 Bottle" : `${qty} Bottles`;
+    } else {
+      friendlyLabel = qty === 1
+        ? `1 Pack of ${bottlesPerPack} Bottles (${bottlesPerPack} bottles)`
+        : `${qty} Packs of ${bottlesPerPack} Bottles (${totalBottles} bottles total)`;
+    }
+
+    itemsByOrderId.get(oid)!.push({
+      ...it,
+      variantName: optStr || (it.productId as any)?.name || "Standard",
+      quantity: qty,
+      bottlesPerPack,
+      totalBottles,
+      friendlyLabel,
+    });
+  }
+
+  // Fetch user profiles
+  const users = await User.find({ _id: { $in: returningUserIds } })
+    .select("username email phone avatar role")
+    .lean();
+  const userMap = new Map<string, any>(users.map((u: any) => [String(u._id), u]));
+
+  // Group orders by user
+  const ordersByUser = new Map<string, any[]>();
+  for (const o of allOrders) {
+    const uid = String(o.userId);
+    if (!ordersByUser.has(uid)) ordersByUser.set(uid, []);
+    ordersByUser.get(uid)!.push(o);
+  }
+
+  let overallNewPacks = 0;
+  let overallNewBottles = 0;
+  let overallNewRevenue = 0;
+  let overallPriorPacks = 0;
+  let overallPriorBottles = 0;
+  let overallLifetimeBottles = 0;
+
+  const customerRows: any[] = [];
+
+  for (const uid of returningUserIds.map((id: any) => String(id))) {
+    const user = userMap.get(uid);
+    const userOrders = ordersByUser.get(uid) || [];
+
+    const monthlyMap = new Map<string, {
+      month: string;
+      isThisMonth: boolean;
+      packs: number;
+      bottles: number;
+      quantity: number;
+      amount: number;
+      orderCount: number;
+      items: string[];
+      orders: any[];
+    }>();
+
+    let userPriorPacks = 0;
+    let userPriorBottles = 0;
+    let userPriorSpend = 0;
+    let userThisMonthPacks = 0;
+    let userThisMonthBottles = 0;
+    let userThisMonthSpend = 0;
+    const thisMonthOrders: any[] = [];
+
+    for (const o of userOrders) {
+      const d = new Date(o.createdAt);
+      const mKey = d.toLocaleString("en-US", { month: "short", year: "numeric" });
+      const isThisMonth = d >= windowStart && d <= windowEnd;
+      const items = itemsByOrderId.get(String(o._id)) || [];
+      const orderPacks = items.reduce((sum: number, it: any) => sum + (it.quantity || 1), 0);
+      const orderBottles = items.reduce((sum: number, it: any) => sum + (it.totalBottles || it.quantity || 1), 0);
+
+      if (!monthlyMap.has(mKey)) {
+        monthlyMap.set(mKey, {
+          month: mKey,
+          isThisMonth,
+          packs: 0,
+          bottles: 0,
+          quantity: 0,
+          amount: 0,
+          orderCount: 0,
+          items: [],
+          orders: [],
+        });
+      }
+
+      const mEntry = monthlyMap.get(mKey)!;
+      mEntry.packs += orderPacks;
+      mEntry.bottles += orderBottles;
+      mEntry.quantity += orderBottles;
+      mEntry.amount += (o.finalAmount || 0);
+      mEntry.orderCount += 1;
+      for (const it of items) {
+        mEntry.items.push(it.friendlyLabel);
+      }
+      mEntry.orders.push({
+        id: o._id,
+        _id: o._id,
+        orderStatus: o.orderStatus,
+        paymentStatus: o.paymentStatus,
+        paymentMethod: o.paymentMethod,
+        finalAmount: o.finalAmount,
+        createdAt: o.createdAt,
+        items,
+        shippingAddress: o.shippingAddress,
+        deliveryPartnerName: o.deliveryPartnerName,
+        trackingId: o.trackingId,
+        trackingLink: o.trackingLink,
+        packs: orderPacks,
+        bottles: orderBottles,
+      });
+
+      if (isThisMonth) {
+        userThisMonthPacks += orderPacks;
+        userThisMonthBottles += orderBottles;
+        userThisMonthSpend += (o.finalAmount || 0);
+        thisMonthOrders.push({
+          id: o._id,
+          _id: o._id,
+          orderStatus: o.orderStatus,
+          paymentStatus: o.paymentStatus,
+          paymentMethod: o.paymentMethod,
+          finalAmount: o.finalAmount,
+          createdAt: o.createdAt,
+          items,
+          shippingAddress: o.shippingAddress,
+          deliveryPartnerName: o.deliveryPartnerName,
+          trackingId: o.trackingId,
+          trackingLink: o.trackingLink,
+          packs: orderPacks,
+          bottles: orderBottles,
+          quantity: orderBottles,
+        });
+      } else {
+        userPriorPacks += orderPacks;
+        userPriorBottles += orderBottles;
+        userPriorSpend += (o.finalAmount || 0);
+      }
+    }
+
+    overallNewPacks += userThisMonthPacks;
+    overallNewBottles += userThisMonthBottles;
+    overallNewRevenue += userThisMonthSpend;
+    overallPriorPacks += userPriorPacks;
+    overallPriorBottles += userPriorBottles;
+    overallLifetimeBottles += (userPriorBottles + userThisMonthBottles);
+
+    const allMonthlyHistory = Array.from(monthlyMap.values());
+    const priorMonthsBreakdown = allMonthlyHistory.filter((m) => !m.isThisMonth);
+    const latestOrder = thisMonthOrders[0] || userOrders[0];
+
+    const customerObj = {
+      _id: uid,
+      id: uid,
+      username: user?.username || latestOrder?.shippingAddress?.name || "Customer",
+      phone: user?.phone || latestOrder?.shippingAddress?.phone || "N/A",
+      email: user?.email || "No email",
+      city: latestOrder?.shippingAddress?.city || "N/A",
+      state: latestOrder?.shippingAddress?.state || "N/A",
+      address: latestOrder?.shippingAddress,
+    };
+
+    customerRows.push({
+      userId: uid,
+      customer: customerObj,
+      latestOrder: {
+        ...latestOrder,
+        user: customerObj,
+      },
+      thisMonthOrders,
+      thisMonthOrdersCount: thisMonthOrders.length,
+      thisMonthPacks: userThisMonthPacks,
+      thisMonthBottles: userThisMonthBottles,
+      thisMonthQty: userThisMonthBottles,
+      thisMonthSpend: Math.round(userThisMonthSpend),
+      priorTotalPacks: userPriorPacks,
+      priorTotalBottles: userPriorBottles,
+      priorTotalQty: userPriorBottles,
+      priorTotalSpend: Math.round(userPriorSpend),
+      priorMonthsBreakdown,
+      lifetimeTotalPacks: userPriorPacks + userThisMonthPacks,
+      lifetimeTotalBottles: userPriorBottles + userThisMonthBottles,
+      lifetimeTotalQty: userPriorBottles + userThisMonthBottles,
+      lifetimeTotalSpend: Math.round(userPriorSpend + userThisMonthSpend),
+      allMonthlyHistory,
+    });
+  }
+
+  // Filter by search query if present
+  let filteredRows = customerRows;
+  if (options.search && options.search.trim()) {
+    const q = options.search.trim().toLowerCase();
+    filteredRows = customerRows.filter((r) => {
+      const c = r.customer;
+      return (
+        c.username?.toLowerCase().includes(q) ||
+        c.phone?.toLowerCase().includes(q) ||
+        c.email?.toLowerCase().includes(q) ||
+        c.city?.toLowerCase().includes(q) ||
+        c.state?.toLowerCase().includes(q) ||
+        String(r.latestOrder?.id || "").toLowerCase().includes(q)
+      );
+    });
+  }
+
+  // Sort by latest order date descending
+  filteredRows.sort((a, b) => {
+    const dateA = new Date(a.latestOrder?.createdAt || 0).getTime();
+    const dateB = new Date(b.latestOrder?.createdAt || 0).getTime();
+    return dateB - dateA;
+  });
+
+  const page = Math.max(1, Number(options.page) || 1);
+  const limit = Math.max(1, Number(options.limit) || 20);
+  const skip = (page - 1) * limit;
+  const paginatedRows = filteredRows.slice(skip, skip + limit);
+
+  // Backward-compatible orders list
+  const enrichedOrders = paginatedRows.map((r) => ({
+    id: r.latestOrder.id,
+    _id: r.latestOrder.id,
+    finalAmount: r.latestOrder.finalAmount,
+    totalAmount: r.latestOrder.finalAmount,
+    orderStatus: r.latestOrder.orderStatus,
+    paymentStatus: r.latestOrder.paymentStatus,
+    paymentMethod: r.latestOrder.paymentMethod,
+    shippingAddress: r.latestOrder.shippingAddress,
+    deliveryPartnerName: r.latestOrder.deliveryPartnerName,
+    trackingId: r.latestOrder.trackingId,
+    trackingLink: r.latestOrder.trackingLink,
+    createdAt: r.latestOrder.createdAt,
+    user: r.customer,
+    customer: r.customer,
+    items: r.latestOrder.items || [],
+    itemsCount: r.thisMonthBottles,
+    thisMonthPacks: r.thisMonthPacks,
+    thisMonthBottles: r.thisMonthBottles,
+    thisMonthQty: r.thisMonthBottles,
+    thisMonthSpend: r.thisMonthSpend,
+    priorTotalPacks: r.priorTotalPacks,
+    priorTotalBottles: r.priorTotalBottles,
+    priorTotalQty: r.priorTotalBottles,
+    priorTotalSpend: r.priorTotalSpend,
+    priorMonthsBreakdown: r.priorMonthsBreakdown,
+    lifetimeTotalPacks: r.lifetimeTotalPacks,
+    lifetimeTotalBottles: r.lifetimeTotalBottles,
+    lifetimeTotalQty: r.lifetimeTotalBottles,
+    lifetimeTotalSpend: r.lifetimeTotalSpend,
+    allMonthlyHistory: r.allMonthlyHistory,
+    allThisMonthOrders: r.thisMonthOrders,
+    isReturningCustomer: true,
+  }));
+
+  const stats = {
+    totalReturningCustomers: customerRows.length,
+    totalThisMonthBottles: overallNewBottles,
+    totalThisMonthPacks: overallNewPacks,
+    totalThisMonthQty: overallNewBottles,
+    totalThisMonthRevenue: Math.round(overallNewRevenue),
+    totalPriorBottles: overallPriorBottles,
+    totalPriorQty: overallPriorBottles,
+    totalLifetimeBottles: overallLifetimeBottles,
+    totalLifetimeQty: overallLifetimeBottles,
+    averageThisMonthSpend: customerRows.length ? Math.round(overallNewRevenue / customerRows.length) : 0,
+    monthLabel,
+    windowStart: windowStart.toISOString(),
+    windowEnd: windowEnd.toISOString(),
+    totalOrders: customerRows.length,
+    totalRevenue: Math.round(overallNewRevenue),
+    uniqueCustomersCount: customerRows.length,
+    averageOrderValue: customerRows.length ? Math.round(overallNewRevenue / customerRows.length) : 0,
+  };
+
+  return {
+    customers: paginatedRows,
+    orders: enrichedOrders,
+    stats,
+    pagination: {
+      page,
+      limit,
+      total: filteredRows.length,
+      totalPages: Math.ceil(filteredRows.length / limit) || 1,
+    },
+  };
+};
+
+// GET /api/admin/returning-customer-orders
+export const getReturningCustomerOrders = async (req: Request, res: Response) => {
+  try {
+    const { page, limit, search, status, paymentMethod, sortBy, month, year, from, to } = req.query as any;
+    const result = await fetchReturningCustomerOrdersData({
+      page: page ? Number(page) : 1,
+      limit: limit ? Number(limit) : 20,
+      search: search ? String(search) : undefined,
+      status: status ? String(status) : undefined,
+      paymentMethod: paymentMethod ? String(paymentMethod) : undefined,
+      sortBy: sortBy ? String(sortBy) as any : undefined,
+      month: month ? Number(month) : undefined,
+      year: year ? Number(year) : undefined,
+      from: from ? String(from) : undefined,
+      to: to ? String(to) : undefined,
+    });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    logger.error("getReturningCustomerOrders error", err);
+    return res.status(500).json({ message: "Error fetching returning customer orders", error: err.message });
   }
 };

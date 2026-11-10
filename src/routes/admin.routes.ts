@@ -14,6 +14,7 @@ import {
   createAdminUser,
   updateUser,
   deleteUser,
+  getReturningCustomerOrders,
 } from "../controllers/admin.controller";
 import { validate } from "../middleware/validate.middleware";
 import { createUserSchema } from "../schemas/user.schema";
@@ -71,6 +72,9 @@ router.get("/summary", authMiddleware, adminOrStaff("ANALYTICS_VIEW"), getAdminS
 
 // Dashboard live snapshot — no feature gate (always accessible to admin/super-admin)
 router.get("/dashboard", authMiddleware, adminMiddleware, getDashboardData);
+
+// Returning / previous customer orders (dashboard + dedicated detail view)
+router.get("/returning-customer-orders", authMiddleware, adminOrStaff(["ORDER_VIEW", "ORDER_UPDATE", "ANALYTICS_VIEW"]), getReturningCustomerOrders);
 
 // Company settings — GET is public (invoice pages), PUT requires admin
 router.get("/company-settings", getCompanySettings);

@@ -615,6 +615,8 @@ export const adminStockSummary = async (req: Request, res: Response) => {
 export const productAdminDetail = async (req: Request, res: Response) => {
   try {
     const id = req.params.id as string;
+    const { startDate, endDate, month, year } = req.query as Record<string, string | undefined>;
+
     const product = await prisma.product.findUnique({
       where: { id },
       include: {
@@ -638,41 +640,211 @@ export const productAdminDetail = async (req: Request, res: Response) => {
       orderBy: { createdAt: "asc" },
     });
 
+    // Build date filter for Order match
+    const orderMatch: any = {
+      "order.orderStatus": { $nin: ["CANCELLED", "RETURNED"] },
+    };
+
+    let start: Date | null = null;
+    let end: Date | null = null;
+
+    if (startDate && startDate.trim()) {
+      const parsedStart = new Date(startDate.trim());
+      if (!isNaN(parsedStart.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(startDate.trim())) {
+          parsedStart.setUTCHours(0, 0, 0, 0);
+        }
+        start = parsedStart;
+      }
+    }
+
+    if (endDate && endDate.trim()) {
+      const parsedEnd = new Date(endDate.trim());
+      if (!isNaN(parsedEnd.getTime())) {
+        if (/^\d{4}-\d{2}-\d{2}$/.test(endDate.trim())) {
+          parsedEnd.setUTCHours(23, 59, 59, 999);
+        }
+        end = parsedEnd;
+      }
+    }
+
+    if (!start && !end && month && year) {
+      const m = parseInt(month, 10);
+      const y = parseInt(year, 10);
+      if (!isNaN(m) && !isNaN(y) && m >= 1 && m <= 12) {
+        start = new Date(Date.UTC(y, m - 1, 1, 0, 0, 0, 0));
+        end = new Date(Date.UTC(y, m, 0, 23, 59, 59, 999));
+      }
+    }
+
+    if (start || end) {
+      const createdAtMatch: any = {};
+      if (start) createdAtMatch.$gte = start;
+      if (end) createdAtMatch.$lte = end;
+      orderMatch["order.createdAt"] = createdAtMatch;
+    }
+
     // Compute sales metrics from OrderItem
-    let salesStats = { totalUnitsSold: 0, totalRevenue: 0, totalOrdersCount: 0 };
+    let salesStats = {
+      totalUnitsSold: 0,
+      totalRevenue: 0,
+      totalOrdersCount: 0,
+      lifetimeUnitsSold: 0,
+      lifetimeRevenue: 0,
+      lifetimeOrdersCount: 0,
+    };
+    let variantSalesMap: Record<string, { unitsSold: number; revenue: number; ordersCount: number }> = {};
+    let monthlyBreakdown: Array<{ year: number; month: number; unitsSold: number; revenue: number }> = [];
+
     try {
-      const salesAggregate = await OrderItem.aggregate([
-        { $match: { productId: new mongoose.Types.ObjectId(id) } },
-        {
-          $lookup: {
-            from: "orders",
-            localField: "orderId",
-            foreignField: "_id",
-            as: "order",
+      const productObjectId = new mongoose.Types.ObjectId(id);
+
+      const [periodAggregate, variantSalesAggregate, monthlyAggregate] = await Promise.all([
+        OrderItem.aggregate([
+          { $match: { productId: productObjectId } },
+          {
+            $lookup: {
+              from: "orders",
+              localField: "orderId",
+              foreignField: "_id",
+              as: "order",
+            },
           },
-        },
-        { $unwind: "$order" },
-        { $match: { "order.orderStatus": { $nin: ["CANCELLED", "RETURNED"] } } },
-        {
-          $group: {
-            _id: "$productId",
-            totalUnitsSold: { $sum: "$quantity" },
-            totalRevenue: { $sum: { $multiply: ["$quantity", "$price"] } },
-            totalOrders: { $addToSet: "$orderId" },
+          { $unwind: "$order" },
+          { $match: orderMatch },
+          {
+            $group: {
+              _id: "$productId",
+              totalUnitsSold: { $sum: "$quantity" },
+              totalRevenue: { $sum: { $multiply: ["$quantity", "$price"] } },
+              totalOrders: { $addToSet: "$orderId" },
+            },
           },
-        },
+        ]),
+        OrderItem.aggregate([
+          { $match: { productId: productObjectId } },
+          {
+            $lookup: {
+              from: "orders",
+              localField: "orderId",
+              foreignField: "_id",
+              as: "order",
+            },
+          },
+          { $unwind: "$order" },
+          { $match: orderMatch },
+          {
+            $group: {
+              _id: "$variantId",
+              unitsSold: { $sum: "$quantity" },
+              revenue: { $sum: { $multiply: ["$quantity", "$price"] } },
+              totalOrders: { $addToSet: "$orderId" },
+            },
+          },
+        ]),
+        OrderItem.aggregate([
+          { $match: { productId: productObjectId } },
+          {
+            $lookup: {
+              from: "orders",
+              localField: "orderId",
+              foreignField: "_id",
+              as: "order",
+            },
+          },
+          { $unwind: "$order" },
+          { $match: { "order.orderStatus": { $nin: ["CANCELLED", "RETURNED"] } } },
+          {
+            $group: {
+              _id: {
+                year: { $year: "$order.createdAt" },
+                month: { $month: "$order.createdAt" },
+              },
+              unitsSold: { $sum: "$quantity" },
+              revenue: { $sum: { $multiply: ["$quantity", "$price"] } },
+            },
+          },
+          { $sort: { "_id.year": -1, "_id.month": -1 } },
+          { $limit: 12 },
+        ]),
       ]);
 
-      if (salesAggregate && salesAggregate[0]) {
-        salesStats = {
-          totalUnitsSold: salesAggregate[0].totalUnitsSold ?? 0,
-          totalRevenue: Math.round(salesAggregate[0].totalRevenue ?? 0),
-          totalOrdersCount: Array.isArray(salesAggregate[0].totalOrders) ? salesAggregate[0].totalOrders.length : 0,
-        };
+      const periodUnits = periodAggregate?.[0]?.totalUnitsSold ?? 0;
+      const periodRevenue = Math.round(periodAggregate?.[0]?.totalRevenue ?? 0);
+      const periodOrders = Array.isArray(periodAggregate?.[0]?.totalOrders) ? periodAggregate[0].totalOrders.length : 0;
+
+      let lifetimeUnits = periodUnits;
+      let lifetimeRevenue = periodRevenue;
+      let lifetimeOrders = periodOrders;
+
+      if (start || end) {
+        const lifetimeAggregate = await OrderItem.aggregate([
+          { $match: { productId: productObjectId } },
+          {
+            $lookup: {
+              from: "orders",
+              localField: "orderId",
+              foreignField: "_id",
+              as: "order",
+            },
+          },
+          { $unwind: "$order" },
+          { $match: { "order.orderStatus": { $nin: ["CANCELLED", "RETURNED"] } } },
+          {
+            $group: {
+              _id: "$productId",
+              totalUnitsSold: { $sum: "$quantity" },
+              totalRevenue: { $sum: { $multiply: ["$quantity", "$price"] } },
+              totalOrders: { $addToSet: "$orderId" },
+            },
+          },
+        ]);
+
+        if (lifetimeAggregate && lifetimeAggregate[0]) {
+          lifetimeUnits = lifetimeAggregate[0].totalUnitsSold ?? 0;
+          lifetimeRevenue = Math.round(lifetimeAggregate[0].totalRevenue ?? 0);
+          lifetimeOrders = Array.isArray(lifetimeAggregate[0].totalOrders) ? lifetimeAggregate[0].totalOrders.length : 0;
+        }
+      }
+
+      salesStats = {
+        totalUnitsSold: periodUnits,
+        totalRevenue: periodRevenue,
+        totalOrdersCount: periodOrders,
+        lifetimeUnitsSold: lifetimeUnits,
+        lifetimeRevenue: lifetimeRevenue,
+        lifetimeOrdersCount: lifetimeOrders,
+      };
+
+      if (Array.isArray(variantSalesAggregate)) {
+        for (const item of variantSalesAggregate) {
+          const key = item._id ? String(item._id) : "unassigned";
+          variantSalesMap[key] = {
+            unitsSold: item.unitsSold ?? 0,
+            revenue: Math.round(item.revenue ?? 0),
+            ordersCount: Array.isArray(item.totalOrders) ? item.totalOrders.length : 0,
+          };
+        }
+      }
+
+      if (Array.isArray(monthlyAggregate)) {
+        monthlyBreakdown = monthlyAggregate.map((m: any) => ({
+          year: m._id.year,
+          month: m._id.month,
+          unitsSold: m.unitsSold ?? 0,
+          revenue: Math.round(m.revenue ?? 0),
+        }));
       }
     } catch (salesErr) {
       logger.warn("productAdminDetail: salesAggregate failed, falling back to 0", salesErr);
     }
+
+    const variantsWithSales = variants.map((v: any) => ({
+      ...v,
+      unitsSold: variantSalesMap[String(v.id)]?.unitsSold ?? 0,
+      revenue: variantSalesMap[String(v.id)]?.revenue ?? 0,
+      ordersCount: variantSalesMap[String(v.id)]?.ordersCount ?? 0,
+    }));
 
     // Query recent stock adjustment audit logs for this product
     let stockHistory: any[] = [];
@@ -710,8 +882,15 @@ export const productAdminDetail = async (req: Request, res: Response) => {
 
     res.status(200).json({
       product,
-      variants,
+      variants: variantsWithSales,
+      variantSales: variantSalesMap,
       salesStats,
+      monthlyBreakdown,
+      filterPeriod: {
+        startDate: startDate || null,
+        endDate: endDate || null,
+        hasDateFilter: Boolean(start || end),
+      },
       stockHistory,
     });
   } catch (err: any) {
