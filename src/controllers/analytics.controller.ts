@@ -1,5 +1,5 @@
 import { Request, Response } from "express";
-import { User, Product, Order, OrderItem } from "../models/mongoose";
+import { User, Product, ProductVariant, Order, OrderItem } from "../models/mongoose";
 import logger from "../utils/logger";
 
 // All handlers in this file use native MongoDB aggregation pipelines (via the Mongoose
@@ -283,25 +283,34 @@ export const getProfitSummary = async (req: Request, res: Response) => {
       { $lookup: { from: "orders", localField: "orderId", foreignField: "_id", as: "order" } },
       { $unwind: "$order" },
       { $match: match },
+      { $lookup: { from: "productvariants", localField: "variantId", foreignField: "_id", as: "variant" } },
+      { $unwind: { path: "$variant", preserveNullAndEmptyArrays: true } },
       { $lookup: { from: "products", localField: "productId", foreignField: "_id", as: "product" } },
       { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
       {
+        $addFields: {
+          effectiveUnitCost: {
+            $cond: [
+              { $gt: ["$variant.purchasePriceOverride", 0] },
+              "$variant.purchasePriceOverride",
+              {
+                $cond: [
+                  { $gt: ["$product.purchasePrice", 0] },
+                  "$product.purchasePrice",
+                  0,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      {
         $group: {
           _id: null,
-          // $gt 0, not $ne null — a 0 purchasePrice means "cost unset, defaulted" (see
-          // VariantsManagerFields.tsx/productVariant.controller.ts, which save an unknown
-          // variant cost as literal 0 rather than blocking the save), not "genuinely free
-          // to acquire". Counting it would falsely show 100% margin/full cost coverage.
           totalCost: {
-            $sum: {
-              $cond: [
-                { $gt: ["$product.purchasePrice", 0] },
-                { $multiply: ["$product.purchasePrice", "$quantity"] },
-                0,
-              ],
-            },
+            $sum: { $multiply: ["$effectiveUnitCost", "$quantity"] },
           },
-          itemsWithCost: { $sum: { $cond: [{ $gt: ["$product.purchasePrice", 0] }, 1, 0] } },
+          itemsWithCost: { $sum: { $cond: [{ $gt: ["$effectiveUnitCost", 0] }, 1, 0] } },
           itemsTotal: { $sum: 1 },
         },
       },
@@ -390,14 +399,32 @@ export const getProfitByDay = async (req: Request, res: Response) => {
         { $lookup: { from: "orders", localField: "orderId", foreignField: "_id", as: "order" } },
         { $unwind: "$order" },
         { $match: { "order.paymentStatus": "PAID", "order.createdAt": { $gte: fromDate, $lte: toDate } } },
+        { $lookup: { from: "productvariants", localField: "variantId", foreignField: "_id", as: "variant" } },
+        { $unwind: { path: "$variant", preserveNullAndEmptyArrays: true } },
         { $lookup: { from: "products", localField: "productId", foreignField: "_id", as: "product" } },
         { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
-        // Same "0 means unknown, not free" rule as getProfitSummary's costPipelineFor above.
-        { $match: { "product.purchasePrice": { $gt: 0 } } },
+        {
+          $addFields: {
+            effectiveUnitCost: {
+              $cond: [
+                { $gt: ["$variant.purchasePriceOverride", 0] },
+                "$variant.purchasePriceOverride",
+                {
+                  $cond: [
+                    { $gt: ["$product.purchasePrice", 0] },
+                    "$product.purchasePrice",
+                    0,
+                  ],
+                },
+              ],
+            },
+          },
+        },
+        { $match: { effectiveUnitCost: { $gt: 0 } } },
         {
           $group: {
             _id: { $dateToString: { format: "%Y-%m-%d", date: "$order.createdAt" } },
-            cost: { $sum: { $multiply: ["$product.purchasePrice", "$quantity"] } },
+            cost: { $sum: { $multiply: ["$effectiveUnitCost", "$quantity"] } },
           },
         },
       ]),
@@ -453,23 +480,48 @@ export const getTopProductsByProfit = async (req: Request, res: Response) => {
       { $lookup: { from: "orders", localField: "orderId", foreignField: "_id", as: "order" } },
       { $unwind: "$order" },
       { $match: orderMatch },
-      {
-        $group: {
-          _id: "$productId",
-          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
-          totalQuantitySold: { $sum: "$quantity" },
-          orderCount: { $sum: 1 },
-        },
-      },
-      { $lookup: { from: "products", localField: "_id", foreignField: "_id", as: "product" } },
+      { $lookup: { from: "productvariants", localField: "variantId", foreignField: "_id", as: "variant" } },
+      { $unwind: { path: "$variant", preserveNullAndEmptyArrays: true } },
+      { $lookup: { from: "products", localField: "productId", foreignField: "_id", as: "product" } },
       { $unwind: { path: "$product", preserveNullAndEmptyArrays: true } },
       {
         $addFields: {
-          // Same "0 means unknown, not free" rule as getProfitSummary's costPipelineFor above.
+          effectiveUnitCost: {
+            $cond: [
+              { $gt: ["$variant.purchasePriceOverride", 0] },
+              "$variant.purchasePriceOverride",
+              {
+                $cond: [
+                  { $gt: ["$product.purchasePrice", 0] },
+                  "$product.purchasePrice",
+                  0,
+                ],
+              },
+            ],
+          },
+        },
+      },
+      {
+        $group: {
+          _id: "$productId",
+          product: { $first: "$product" },
+          totalRevenue: { $sum: { $multiply: ["$price", "$quantity"] } },
+          totalQuantitySold: { $sum: "$quantity" },
+          orderCount: { $sum: 1 },
+          totalCostSum: {
+            $sum: { $multiply: ["$effectiveUnitCost", "$quantity"] },
+          },
+          itemsWithCost: {
+            $sum: { $cond: [{ $gt: ["$effectiveUnitCost", 0] }, 1, 0] },
+          },
+        },
+      },
+      {
+        $addFields: {
           totalCost: {
             $cond: [
-              { $gt: ["$product.purchasePrice", 0] },
-              { $multiply: ["$product.purchasePrice", "$totalQuantitySold"] },
+              { $gt: ["$itemsWithCost", 0] },
+              "$totalCostSum",
               null,
             ],
           },
